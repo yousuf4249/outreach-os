@@ -79,12 +79,24 @@ async def get_google_oauth_credentials(db: AsyncSession | None = None) -> tuple[
 
     The values are read from ``app.settings_manager.settings`` which itself
     picks them up from environment variables (or a ``.env`` file) when the
-    process starts.  Older versions stored these credentials in the database,
-    but the lookup was removed to avoid surprises; the database is now
-    ignored entirely.  The ``db`` parameter is accepted for backwards
-    compatibility with existing callers but is unused.
+    process starts.
     """
-    # simply return whatever is currently in memory (populated from env)
+    if not settings.google_client_id or not settings.google_client_secret:
+        import os
+        cid = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+        sec = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+        if cid and sec:
+            settings.google_client_id = cid
+            settings.google_client_secret = sec
+        else:
+            try:
+                from dotenv import dotenv_values
+                env_vals = dotenv_values(".env")
+                if env_vals.get("GOOGLE_CLIENT_ID") and env_vals.get("GOOGLE_CLIENT_SECRET"):
+                    settings.google_client_id = env_vals["GOOGLE_CLIENT_ID"].strip()
+                    settings.google_client_secret = env_vals["GOOGLE_CLIENT_SECRET"].strip()
+            except Exception:
+                pass
     return settings.google_client_id, settings.google_client_secret
 
 
