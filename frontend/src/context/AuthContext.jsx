@@ -94,6 +94,53 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
+  const login = useCallback(async (username, password) => {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ username, password }),
+    });
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { detail: text || res.statusText };
+    }
+    if (!res.ok) {
+      const d = data.detail;
+      const msg = typeof d === 'string' ? d : Array.isArray(d) ? d.map(x => x.msg || x).join('; ') : 'Login failed';
+      throw new Error(msg);
+    }
+    _accessToken = data.access_token;
+    await fetchUser();
+    await checkSetup();
+    return true;
+  }, [fetchUser, checkSetup]);
+
+  const register = useCallback(async (username, email, password) => {
+    const res = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ username, email, password }),
+    });
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { detail: text || res.statusText };
+    }
+    if (!res.ok) {
+      const d = data.detail;
+      const msg = typeof d === 'string' ? d : Array.isArray(d) ? d.map(x => x.msg || x).join('; ') : 'Registration failed';
+      throw new Error(msg);
+    }
+    return login(username, password);
+  }, [login]);
+
   // On mount: check setup status, try refresh from httpOnly cookie
   useEffect(() => {
     (async () => {
@@ -117,6 +164,8 @@ export function AuthProvider({ children }) {
       user,
       loading,
       setupComplete,
+      login,
+      register,
       logout,
       refreshToken,
       checkSetup,
