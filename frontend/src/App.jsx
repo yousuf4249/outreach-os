@@ -13,6 +13,7 @@ import DeliverabilityTips from './pages/DeliverabilityTips';
 import SystemHealth from './pages/SystemHealth';
 import Leads from './pages/Leads';
 import LeadDetail from './pages/LeadDetail';
+import Templates from './pages/Templates';
 import Notifications from './pages/Notifications';
 import Login from './pages/Login';
 import { api } from './api';
@@ -62,6 +63,7 @@ function AppRoutes() {
               <Route path="/campaigns/:id" element={<CampaignDetail />} />
               <Route path="/leads" element={<Leads />} />
               <Route path="/leads/:id" element={<LeadDetail />} />
+              <Route path="/templates" element={<Templates />} />
               <Route path="/inboxes" element={<Inboxes />} />
               <Route path="/unibox" element={<Unibox />} />
               <Route path="/schedule" element={<Schedule />} />

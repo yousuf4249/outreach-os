@@ -20,12 +20,16 @@ from app.models import (
     CampaignLead,
     EmailLog,
     GmailMessage,
+    ImportHistory,
     Lead,
     LeadReply,
     Office365Message,
+    QueueSlot,
 )
 from app.schemas import (
+    LeadBulkAssignCampaignRequest,
     LeadBulkDeleteRequest,
+    LeadBulkPipelineStatusRequest,
     LeadBulkRecoverItem,
     LeadBulkRecoverRequest,
     LeadBulkStatusRequest,
@@ -80,8 +84,9 @@ def _lead_to_response(
 ) -> LeadResponse:
     camps = []
     ib = inbox_by_pair or {}
-    for cl in lead.campaign_leads:
-        c = cl.campaign
+    cls = lead.__dict__.get('campaign_leads') or []
+    for cl in cls:
+        c = cl.__dict__.get('campaign')
         pair = (lead.id, cl.campaign_id)
         camps.append(
             LeadCampaignInfo(
@@ -102,6 +107,16 @@ def _lead_to_response(
         id=lead.id,
         email=lead.email,
         name=lead.name or "",
+        company=getattr(lead, "company", "") or "",
+        phone=getattr(lead, "phone", "") or "",
+        website=getattr(lead, "website", "") or "",
+        industry=getattr(lead, "industry", "") or "",
+        city=getattr(lead, "city", "") or "",
+        country=getattr(lead, "country", "") or "",
+        lead_source=getattr(lead, "lead_source", "") or "",
+        notes=getattr(lead, "notes", "") or "",
+        pipeline_status=getattr(lead, "pipeline_status", "new") or "new",
+        tags=lead.tags if isinstance(getattr(lead, "tags", None), list) else [],
         custom_data=lead.custom_data if isinstance(lead.custom_data, dict) else {},
         provider=lead.provider,
         email_verification_status=lead.email_verification_status,
@@ -804,12 +819,36 @@ async def import_recover_csv(
     return await bulk_recover_leads(bulk_body, background_tasks, db)
 
 
-@router.post("", response_model=LeadResponse)
+@router.post("", response_model=LeadResponse, status_code=201)
 async def create_lead(data: LeadCreate, db: AsyncSession = Depends(get_db)):
-    raise HTTPException(
-        405,
-        "Creating leads without a campaign is not allowed; use POST /api/campaigns/{campaign_id}/leads",
+    """Create a single prospect directly in the central prospect database."""
+    norm_email = data.email.strip().lower()
+    if not norm_email or "@" not in norm_email:
+        raise HTTPException(status_code=400, detail="Valid email address is required")
+
+    existing = await db.execute(select(Lead).where(Lead.email == norm_email))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail=f"Prospect with email '{norm_email}' already exists")
+
+    lead = Lead(
+        email=norm_email,
+        name=data.name.strip(),
+        company=data.company.strip(),
+        phone=data.phone.strip(),
+        website=data.website.strip(),
+        industry=data.industry.strip(),
+        city=data.city.strip(),
+        country=data.country.strip(),
+        lead_source=data.lead_source.strip(),
+        notes=data.notes.strip(),
+        pipeline_status=data.pipeline_status.strip() or "new",
+        tags=data.tags or [],
+        custom_data=data.custom_data or {},
     )
+    db.add(lead)
+    await db.flush()
+    await db.refresh(lead)
+    return _lead_to_response(lead, set(), set(), set())
 
 
 @router.post("/mark-replied")
@@ -866,9 +905,36 @@ async def update_lead(
         raise HTTPException(404, "Lead not found")
     if data.name is not None:
         lead.name = data.name
+    if data.company is not None:
+        lead.company = data.company
+    if data.phone is not None:
+        lead.phone = data.phone
+    if data.website is not None:
+        lead.website = data.website
+    if data.industry is not None:
+        lead.industry = data.industry
+    if data.city is not None:
+        lead.city = data.city
+    if data.country is not None:
+        lead.country = data.country
+    if data.lead_source is not None:
+        lead.lead_source = data.lead_source
+    if data.notes is not None:
+        lead.notes = data.notes
+    if data.tags is not None:
+        lead.tags = data.tags
     if data.custom_data is not None:
         lead.custom_data = data.custom_data
     enrollment_changed = False
+    if data.pipeline_status is not None:
+        lead.pipeline_status = data.pipeline_status.strip().lower()
+        if lead.pipeline_status in ("interested", "meeting_scheduled", "proposal_sent", "won", "lost", "not_interested"):
+            cl_res = await db.execute(select(CampaignLead).where(CampaignLead.lead_id == lead_id))
+            for cl in cl_res.scalars().all():
+                if lead.pipeline_status in ("interested", "not_interested"):
+                    cl.interest_status = lead.pipeline_status
+                await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id))
+            enrollment_changed = True
     if data.enrollment_status is not None:
         target = normalize_enrollment_status(data.enrollment_status)
         cl_res = await db.execute(select(CampaignLead).where(CampaignLead.lead_id == lead_id))
@@ -893,9 +959,7 @@ async def update_lead(
     )
     lead_loaded = result2.scalar_one()
     opened, clicked, replied = await _engagement_pair_sets(db, [lead_id])
-    # End read transaction so a queued global recalc (separate session on
-    # SQLite StaticPool) is not blocked waiting for this connection.
-    await db.commit()
+    await db.flush()
     interactions = await _fetch_lead_interactions(db, lead_id)
     pairs = {(lead_loaded.id, cl.campaign_id) for cl in lead_loaded.campaign_leads}
     inbox_by_pair = await from_inbox_email_by_lead_campaign(db, pairs)
@@ -1034,3 +1098,296 @@ async def get_lead_replies(lead_id: int, db: AsyncSession = Depends(get_db)):
         }
         for lr, name in result.all()
     ]
+
+
+@router.post("/import")
+async def import_prospects(
+    file: UploadFile = File(...),
+    column_mapping_json: str = Query(default="{}", description="JSON string with column mappings"),
+    campaign_id: int | None = Query(default=None, description="Optional campaign to assign imported prospects to"),
+    tags_json: str = Query(default="[]", description="JSON array of tags to apply to imported prospects"),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    db: AsyncSession = Depends(get_db),
+):
+    """Import prospects from CSV or Excel (.xlsx) file with column mapping and duplicate check."""
+    import openpyxl
+    mapping = {}
+    try:
+        mapping = json.loads(column_mapping_json or "{}")
+    except Exception:
+        mapping = {}
+
+    tags = []
+    try:
+        tags = json.loads(tags_json or "[]")
+    except Exception:
+        tags = []
+
+    content = await file.read()
+    filename = file.filename or "upload.csv"
+    ext = filename.lower().split(".")[-1]
+
+    rows_data: list[dict[str, str]] = []
+    if ext in ("xlsx", "xls"):
+        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+        sheet = wb.active
+        all_rows = list(sheet.iter_rows(values_only=True))
+        if not all_rows or len(all_rows) < 2:
+            raise HTTPException(status_code=400, detail="Spreadsheet is empty or has no header row")
+        headers = [str(h or "").strip() for h in all_rows[0]]
+        for row_vals in all_rows[1:]:
+            row_dict = {}
+            for col_idx, h in enumerate(headers):
+                if not h:
+                    continue
+                v = row_vals[col_idx] if col_idx < len(row_vals) else None
+                row_dict[h] = "" if v is None else str(v).strip()
+            if any(row_dict.values()):
+                rows_data.append(row_dict)
+    else:
+        # CSV parsing
+        text = content.decode("utf-8-sig", errors="replace")
+        reader = csv.reader(io.StringIO(text))
+        all_rows = list(reader)
+        if not all_rows or len(all_rows) < 2:
+            raise HTTPException(status_code=400, detail="CSV file is empty or has no header row")
+        headers = [h.strip() for h in all_rows[0]]
+        for row_vals in all_rows[1:]:
+            row_dict = {}
+            for col_idx, h in enumerate(headers):
+                if not h:
+                    continue
+                v = row_vals[col_idx] if col_idx < len(row_vals) else ""
+                row_dict[h] = str(v).strip()
+            if any(row_dict.values()):
+                rows_data.append(row_dict)
+
+    total_rows = len(rows_data)
+    imported = 0
+    duplicates = 0
+    invalid = 0
+
+    # Auto-detection heuristic if mapping not provided
+    def find_col(aliases: list[str]) -> str | None:
+        for alias in aliases:
+            for k in mapping.keys():
+                if mapping[k] and k.lower() == alias:
+                    return mapping[k]
+            for h in headers:
+                if h.lower() == alias:
+                    return h
+        return None
+
+    email_col = mapping.get("email") or find_col(["email", "e-mail", "mail", "email address", "work email"])
+    name_col = mapping.get("name") or find_col(["name", "full name", "contact name", "founder", "lead name"])
+    first_name_col = mapping.get("first_name") or find_col(["first name", "firstname", "first"])
+    last_name_col = mapping.get("last_name") or find_col(["last name", "lastname", "last"])
+    company_col = mapping.get("company") or find_col(["company", "company name", "business", "business name", "organization", "account"])
+    phone_col = mapping.get("phone") or find_col(["phone", "phone number", "mobile", "telephone"])
+    website_col = mapping.get("website") or find_col(["website", "site", "url", "domain", "web"])
+    industry_col = mapping.get("industry") or find_col(["industry", "sector", "vertical"])
+    city_col = mapping.get("city") or find_col(["city", "location", "town"])
+    country_col = mapping.get("country") or find_col(["country", "nation"])
+    source_col = mapping.get("lead_source") or find_col(["source", "lead source", "channel"])
+    notes_col = mapping.get("notes") or find_col(["notes", "note", "comment", "description"])
+
+    if not email_col:
+        raise HTTPException(status_code=400, detail="Could not detect email column. Please provide a column mapping for 'email'.")
+
+    # Fetch existing emails in bulk for duplicate detection
+    existing_emails_res = await db.execute(select(func.lower(Lead.email)))
+    existing_emails = set(existing_emails_res.scalars().all())
+
+    new_leads_to_add = []
+    enrolled_leads = []
+
+    for r in rows_data:
+        raw_email = r.get(email_col, "").strip().lower()
+        if not raw_email or "@" not in raw_email or "." not in raw_email.split("@")[-1]:
+            invalid += 1
+            continue
+
+        if raw_email in existing_emails:
+            duplicates += 1
+            continue
+
+        # Extract name
+        full_name = ""
+        if name_col and r.get(name_col):
+            full_name = r[name_col]
+        elif first_name_col and r.get(first_name_col):
+            fn = r[first_name_col]
+            ln = r.get(last_name_col, "") if last_name_col else ""
+            full_name = f"{fn} {ln}".strip()
+
+        # Collect custom fields
+        custom_fields = {}
+        standard_cols = {email_col, name_col, first_name_col, last_name_col, company_col, phone_col, website_col, industry_col, city_col, country_col, source_col, notes_col}
+        for k, v in r.items():
+            if k not in standard_cols and v:
+                custom_fields[k] = v
+
+        lead = Lead(
+            email=raw_email,
+            name=full_name,
+            company=r.get(company_col, "") if company_col else "",
+            phone=r.get(phone_col, "") if phone_col else "",
+            website=r.get(website_col, "") if website_col else "",
+            industry=r.get(industry_col, "") if industry_col else "",
+            city=r.get(city_col, "") if city_col else "",
+            country=r.get(country_col, "") if country_col else "",
+            lead_source=r.get(source_col, "") if source_col else "",
+            notes=r.get(notes_col, "") if notes_col else "",
+            pipeline_status="new",
+            tags=list(tags) if tags else [],
+            custom_data=custom_fields,
+        )
+        new_leads_to_add.append(lead)
+        existing_emails.add(raw_email)
+        imported += 1
+
+    if new_leads_to_add:
+        db.add_all(new_leads_to_add)
+        await db.flush()
+
+        # Optional campaign assignment
+        if campaign_id:
+            camp_row = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+            campaign = camp_row.scalar_one_or_none()
+            if campaign:
+                for nl in new_leads_to_add:
+                    cl = CampaignLead(
+                        campaign_id=campaign_id,
+                        lead_id=nl.id,
+                        enrollment_status="active",
+                    )
+                    db.add(cl)
+                await db.flush()
+                from app.routers.schedule import enqueue_global_recalculate
+                enqueue_global_recalculate(background_tasks)
+
+    # Record history
+    history = ImportHistory(
+        filename=filename,
+        total_rows=total_rows,
+        imported_count=imported,
+        duplicate_count=duplicates,
+        invalid_count=invalid,
+    )
+    db.add(history)
+    await db.commit()
+
+    return {
+        "ok": True,
+        "filename": filename,
+        "total_rows": total_rows,
+        "imported": imported,
+        "duplicates": duplicates,
+        "invalid": invalid,
+    }
+
+
+@router.get("/import-history")
+async def list_import_history(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return past prospect import history records."""
+    res = await db.execute(
+        select(ImportHistory).order_by(ImportHistory.created_at.desc()).limit(limit)
+    )
+    history = res.scalars().all()
+    return [
+        {
+            "id": h.id,
+            "filename": h.filename,
+            "total_rows": h.total_rows,
+            "imported_count": h.imported_count,
+            "duplicate_count": h.duplicate_count,
+            "invalid_count": h.invalid_count,
+            "created_at": h.created_at.isoformat() if h.created_at else None,
+        }
+        for h in history
+    ]
+
+
+@router.post("/bulk-campaign-assign")
+async def bulk_assign_to_campaign(
+    body: LeadBulkAssignCampaignRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Assign a list of prospects to an active campaign."""
+    if not body.lead_ids or not body.campaign_id:
+        return {"ok": True, "assigned": 0}
+
+    camp_res = await db.execute(select(Campaign).where(Campaign.id == body.campaign_id))
+    camp = camp_res.scalar_one_or_none()
+    if not camp:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    assigned = 0
+    for lid in body.lead_ids:
+        # check if already enrolled
+        existing = await db.execute(
+            select(CampaignLead).where(
+                CampaignLead.campaign_id == body.campaign_id,
+                CampaignLead.lead_id == lid,
+            )
+        )
+        if existing.scalar_one_or_none():
+            continue
+        cl = CampaignLead(
+            campaign_id=body.campaign_id,
+            lead_id=lid,
+            enrollment_status="active",
+        )
+        db.add(cl)
+        assigned += 1
+
+    await db.flush()
+    if assigned > 0:
+        await db.flush()
+        from app.routers.schedule import enqueue_global_recalculate
+        enqueue_global_recalculate(background_tasks)
+
+    return {"ok": True, "assigned": assigned}
+
+
+@router.post("/bulk-pipeline-status")
+async def bulk_update_pipeline_status(
+    body: LeadBulkPipelineStatusRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk update sales pipeline status for selected prospects."""
+    if not body.lead_ids:
+        return {"ok": True, "updated": 0}
+
+    target = body.pipeline_status.strip().lower()
+    updated = 0
+    stop_sending = target in ("interested", "meeting_scheduled", "proposal_sent", "won", "lost", "not_interested")
+
+    for lid in body.lead_ids:
+        lead_res = await db.execute(select(Lead).where(Lead.id == lid))
+        lead = lead_res.scalar_one_or_none()
+        if not lead:
+            continue
+        lead.pipeline_status = target
+        updated += 1
+
+        if stop_sending:
+            # Stop follow-ups for this lead across their enrollments
+            cls_res = await db.execute(select(CampaignLead).where(CampaignLead.lead_id == lid))
+            for cl in cls_res.scalars().all():
+                if target in ("interested", "not_interested"):
+                    cl.interest_status = target
+                # delete pending slots
+                await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id))
+
+    await db.flush()
+    from app.routers.schedule import enqueue_global_recalculate
+    enqueue_global_recalculate(background_tasks)
+
+    return {"ok": True, "updated": updated, "pipeline_status": target}
+

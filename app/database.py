@@ -216,6 +216,54 @@ async def _run_migrations(conn) -> None:
         # view and quoted follow-ups reproduce what was actually sent even when
         # the template uses {{random: ...}} (which cannot be re-derived later).
         "ALTER TABLE email_log ADD COLUMN IF NOT EXISTS body TEXT NULL",
+        # Weblinx Outreach OS: Extended Lead fields
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS company VARCHAR(255) NOT NULL DEFAULT ''",
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS phone VARCHAR(64) NOT NULL DEFAULT ''",
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS website VARCHAR(255) NOT NULL DEFAULT ''",
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS industry VARCHAR(128) NOT NULL DEFAULT ''",
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS city VARCHAR(128) NOT NULL DEFAULT ''",
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS country VARCHAR(128) NOT NULL DEFAULT ''",
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS lead_source VARCHAR(128) NOT NULL DEFAULT ''",
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS pipeline_status VARCHAR(32) NOT NULL DEFAULT 'new'",
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS tags JSONB DEFAULT '[]'",
+        "CREATE INDEX IF NOT EXISTS ix_lead_pipeline_status ON lead (pipeline_status)",
+        # Weblinx Outreach OS: Suppression List
+        """
+        CREATE TABLE IF NOT EXISTS suppression_list (
+            id SERIAL PRIMARY KEY,
+            email_or_domain VARCHAR(255) NOT NULL UNIQUE,
+            reason VARCHAR(128) NOT NULL DEFAULT 'manual',
+            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_suppression_list_email_or_domain ON suppression_list (email_or_domain)",
+        # Weblinx Outreach OS: Email Template Library
+        """
+        CREATE TABLE IF NOT EXISTS email_template (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            subject VARCHAR(512) NOT NULL DEFAULT '',
+            body TEXT NOT NULL DEFAULT '',
+            is_html BOOLEAN NOT NULL DEFAULT FALSE,
+            preview_text VARCHAR(512),
+            category VARCHAR(64) NOT NULL DEFAULT 'Cold Outreach',
+            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+        )
+        """,
+        # Weblinx Outreach OS: Import History
+        """
+        CREATE TABLE IF NOT EXISTS import_history (
+            id SERIAL PRIMARY KEY,
+            filename VARCHAR(255) NOT NULL,
+            total_rows INTEGER NOT NULL DEFAULT 0,
+            imported_count INTEGER NOT NULL DEFAULT 0,
+            duplicate_count INTEGER NOT NULL DEFAULT 0,
+            invalid_count INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+        )
+        """,
     ]
     # custom_email_override table (IF NOT EXISTS — must be a separate stmt
     # because it uses raw SQL, not ALTER TABLE)

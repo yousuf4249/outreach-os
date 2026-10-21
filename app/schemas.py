@@ -33,11 +33,31 @@ class LeadCampaignInfo(BaseModel):
 class LeadCreate(BaseModel):
     email: str
     name: str = ""
+    company: str = ""
+    phone: str = ""
+    website: str = ""
+    industry: str = ""
+    city: str = ""
+    country: str = ""
+    lead_source: str = ""
+    notes: str = ""
+    pipeline_status: str = "new"
+    tags: List[str] = []
     custom_data: Dict[str, Any] = {}
 
 
 class LeadUpdate(BaseModel):
     name: Optional[str] = None
+    company: Optional[str] = None
+    phone: Optional[str] = None
+    website: Optional[str] = None
+    industry: Optional[str] = None
+    city: Optional[str] = None
+    country: Optional[str] = None
+    lead_source: Optional[str] = None
+    notes: Optional[str] = None
+    pipeline_status: Optional[str] = None
+    tags: Optional[List[str]] = None
     custom_data: Optional[Dict[str, Any]] = None
     # Applied to every CampaignLead row for this lead (queue may recalculate)
     enrollment_status: Optional[str] = None
@@ -60,7 +80,17 @@ class LeadResponse(BaseModel):
     id: int
     email: str
     name: str
-    custom_data: Dict[str, Any]
+    company: Optional[str] = ""
+    phone: Optional[str] = ""
+    website: Optional[str] = ""
+    industry: Optional[str] = ""
+    city: Optional[str] = ""
+    country: Optional[str] = ""
+    lead_source: Optional[str] = ""
+    notes: Optional[str] = ""
+    pipeline_status: Optional[str] = "new"
+    tags: List[str] = Field(default_factory=list)
+    custom_data: Dict[str, Any] = Field(default_factory=dict)
     provider: Optional[str] = None
     # valid | invalid | pending | null (other provider values may still appear in DB)
     email_verification_status: Optional[str] = None
@@ -479,3 +509,85 @@ class WebhookResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+# ---------------------------------------------------------------------------
+# Weblinx Outreach OS Schemas
+# ---------------------------------------------------------------------------
+
+class TemplateCreate(BaseModel):
+    name: str
+    subject: str = ""
+    body: str = ""
+    is_html: bool = False
+    preview_text: Optional[str] = None
+    category: str = "Cold Outreach"
+
+
+class TemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    subject: Optional[str] = None
+    body: Optional[str] = None
+    is_html: Optional[bool] = None
+    preview_text: Optional[str] = None
+    category: Optional[str] = None
+
+
+class TemplateResponse(BaseModel):
+    id: int
+    name: str
+    subject: str
+    body: str
+    is_html: bool
+    preview_text: Optional[str] = None
+    category: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SuppressionCreate(BaseModel):
+    email_or_domain: str
+    reason: str = "manual"
+
+
+class SuppressionResponse(BaseModel):
+    id: int
+    email_or_domain: str
+    reason: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class LeadBulkAssignCampaignRequest(BaseModel):
+    lead_ids: List[int]
+    campaign_id: int
+
+
+class LeadBulkPipelineStatusRequest(BaseModel):
+    lead_ids: List[int]
+    pipeline_status: str
+
+
+class DashboardSummaryResponse(BaseModel):
+    total_prospects: int
+    total_inboxes: int
+    active_campaigns: int
+    emails_scheduled: int
+    emails_sent: int
+    detected_opens: int
+    link_clicks: int
+    replies_received: int
+    interested_prospects: int
+    bounced_emails: int
+    unsubscribed_prospects: int
+    meetings_booked: int
+    reply_rate: float
+    open_signal_rate: float
+    click_rate: float
+    recent_activity: List[Dict[str, Any]] = []
+    campaign_performance: List[Dict[str, Any]] = []
+

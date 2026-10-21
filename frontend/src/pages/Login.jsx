@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { FileUploadArea } from '../components/ui/FileUploadArea';
+import logo from '../assets/weblinx_logo.svg';
 
 const BACKUP_MIN_PASSWORD_LEN = 8;
 
@@ -18,7 +19,13 @@ function parseDetailMessage(text) {
 }
 
 export default function Login() {
-  const { setupComplete } = useAuth();
+  const { setupComplete, login, register } = useAuth();
+  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+
   const [restoreExpanded, setRestoreExpanded] = useState(false);
   const [restoreFile, setRestoreFile] = useState(null);
   const [restoreFileKey, setRestoreFileKey] = useState(0);
@@ -83,326 +90,281 @@ export default function Login() {
     setRestoreMsg(null);
   };
 
-  const heading = isFirstUser
-    ? 'Create your admin account'
-    : 'Sign in to your account';
-
-  const googleLabel = isFirstUser
-    ? 'Create admin account with Google'
-    : 'Sign in with Google';
-
-  const microsoftLabel = isFirstUser
-    ? 'Create admin account with Microsoft'
-    : 'Sign in with Microsoft';
+  const handlePasswordSubmit = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthBusy(true);
+    try {
+      if (isFirstUser) {
+        if (!username.trim() || !email.trim() || !password) {
+          throw new Error('Please fill in all fields');
+        }
+        await register(username.trim(), email.trim(), password);
+      } else {
+        if (!username.trim() || !password) {
+          throw new Error('Please enter username and password');
+        }
+        await login(username.trim(), password);
+      }
+    } catch (err) {
+      setAuthError(err.message || 'Authentication failed');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="max-w-md w-full space-y-8 p-8">
-        <div>
-          <h1 className="text-center text-3xl font-bold text-gray-900">
-            Quickly
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-950 py-12 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-md w-full bg-white dark:bg-gray-900 rounded-2xl shadow-2xl p-8 space-y-6 border border-gray-100 dark:border-gray-800">
+        
+        {/* Logo & Header */}
+        <div className="flex flex-col items-center text-center">
+          <img src={logo} alt="Weblinx Outreach OS" className="h-12 w-12 mb-3 shadow-md rounded-xl" />
+          <h1 className="text-2xl font-extrabold text-gray-900 dark:text-white tracking-tight">
+            Weblinx Outreach OS
           </h1>
-          <h2 className="mt-2 text-center text-lg text-gray-600">
-            {heading}
-          </h2>
+          <p className="mt-1 text-xs font-medium text-blue-600 dark:text-blue-400">
+            Weblinx Solution • Enterprise Sales Automation
+          </p>
+          <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+            {isFirstUser ? 'Create your primary administrator account' : 'Sign in to access your outreach dashboard'}
+          </p>
         </div>
 
-        <div className="mt-8 space-y-4">
+        {authError && (
+          <div className="p-3 rounded-lg bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-xs text-red-600 dark:text-red-400">
+            {authError}
+          </div>
+        )}
+
+        {/* Credentials Form */}
+        <form onSubmit={handlePasswordSubmit} className="space-y-4">
+          <div>
+            <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wider mb-1">
+              Username
+            </label>
+            <input
+              type="text"
+              required
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="admin"
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-800 dark:text-white transition"
+            />
+          </div>
+
+          {isFirstUser && (
+            <div>
+              <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wider mb-1">
+                Admin Email
+              </label>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="admin@weblinxsolution.com"
+                className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-800 dark:text-white transition"
+              />
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wider mb-1">
+              Password {isFirstUser && <span className="text-[10px] text-gray-400 font-normal">(Min 8 chars, 1 uppercase, 1 digit)</span>}
+            </label>
+            <input
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••••••"
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-800 dark:text-white transition"
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={authBusy}
+            className="w-full py-2.5 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm transition shadow-md hover:shadow-lg disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            {authBusy ? 'Authenticating...' : isFirstUser ? 'Create Admin Account' : 'Sign In'}
+          </button>
+        </form>
+
+        {/* Divider */}
+        <div className="relative my-4">
+          <div className="absolute inset-0 flex items-center">
+            <div className="w-full border-t border-gray-200 dark:border-gray-700"></div>
+          </div>
+          <div className="relative flex justify-center text-xs">
+            <span className="px-2 bg-white dark:bg-gray-900 text-gray-400">or continue with OAuth</span>
+          </div>
+        </div>
+
+        {/* OAuth Buttons */}
+        <div className="space-y-2.5">
           <a
             href="/oauth/app/google/authorize"
-            className="w-full flex items-center justify-center gap-3 py-2.5 px-4 border border-gray-300 rounded-lg shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+            className="w-full flex items-center justify-center gap-3 py-2 px-4 border border-gray-300 dark:border-gray-700 rounded-lg text-xs font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-750 transition"
           >
-            <svg className="w-5 h-5" viewBox="0 0 24 24">
+            <svg className="w-4 h-4" viewBox="0 0 24 24">
               <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/>
               <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
               <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
               <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
             </svg>
-            {googleLabel}
+            Sign in with Google Workspace
           </a>
 
           <a
             href="/oauth/app/microsoft/authorize"
-            className="w-full flex items-center justify-center gap-3 py-2.5 px-4 border border-gray-300 rounded-lg shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+            className="w-full flex items-center justify-center gap-3 py-2 px-4 border border-gray-300 dark:border-gray-700 rounded-lg text-xs font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-750 transition"
           >
-            <svg className="w-5 h-5" viewBox="0 0 21 21">
+            <svg className="w-4 h-4" viewBox="0 0 21 21">
               <rect fill="#F25022" x="1" y="1" width="9" height="9"/>
               <rect fill="#7FBA00" x="11" y="1" width="9" height="9"/>
               <rect fill="#00A4EF" x="1" y="11" width="9" height="9"/>
               <rect fill="#FFB900" x="11" y="11" width="9" height="9"/>
             </svg>
-            {microsoftLabel}
+            Sign in with Microsoft 365
           </a>
         </div>
 
+        {/* Restore from backup option */}
         {isFirstUser && (
-          <>
-            <p className="text-center text-sm text-gray-500">
-              The first account created becomes the admin.
-            </p>
-
-            <div className="mt-10 pt-8 border-t border-gray-200 space-y-3">
-              {!restoreExpanded ? (
-                <div className="text-center">
+          <div className="pt-4 border-t border-gray-100 dark:border-gray-800 text-center">
+            {!restoreExpanded ? (
+              <button
+                type="button"
+                onClick={() => setRestoreExpanded(true)}
+                className="text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline"
+              >
+                Need to restore from an existing database backup?
+              </button>
+            ) : (
+              <div className="space-y-3 text-left">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold text-gray-800 dark:text-gray-200">Restore Backup (.qbk)</p>
                   <button
                     type="button"
-                    onClick={() => setRestoreExpanded(true)}
-                    className="text-sm font-medium text-blue-700 hover:text-blue-800 underline underline-offset-2"
+                    onClick={() => {
+                      setRestoreExpanded(false);
+                      clearRestoreWizard();
+                    }}
+                    className="text-[11px] text-gray-500 hover:text-gray-700"
                   >
-                    Want to restore from a backup?
+                    Cancel
                   </button>
                 </div>
-              ) : (
-                <>
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-sm font-medium text-gray-800">Restore from backup</p>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setRestoreExpanded(false);
-                        clearRestoreWizard();
-                      }}
-                      className="text-xs text-gray-500 hover:text-gray-700 underline"
-                    >
-                      Hide
-                    </button>
-                  </div>
-                  <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                    Use a Quickly backup file (<code className="text-[11px]">.qbk</code>). If the backup is encrypted, you need the password — losing it
-                    means the data in that file is unrecoverable. The optional hint is stored in plain text in the file.
-                  </p>
-                  <div className="flex items-stretch gap-2">
-                    <FileUploadArea
-                      key={restoreFileKey}
-                      size="full"
-                      className="text-xs flex-1 min-w-0"
-                      accept=".qbk,application/octet-stream"
-                      disabled={restoreMetaBusy || restorePreviewBusy || restoreExecuteBusy}
-                      onChange={e => {
-                        setRestoreMsg(null);
-                        setRestorePreview(null);
-                        setRestoreMeta(null);
-                        setRestoreFile(e.target.files?.[0] || null);
-                      }}
-                    >
-                      {restoreFile ? (
-                        <span className="truncate text-gray-800">{restoreFile.name}</span>
-                      ) : (
-                        <span className="text-gray-500">Choose backup file (.qbk)</span>
-                      )}
-                    </FileUploadArea>
+
+                <div className="flex items-stretch gap-2">
+                  <FileUploadArea
+                    key={restoreFileKey}
+                    size="full"
+                    className="text-xs flex-1 min-w-0"
+                    accept=".qbk,application/octet-stream"
+                    disabled={restoreMetaBusy || restorePreviewBusy || restoreExecuteBusy}
+                    onChange={e => {
+                      setRestoreMsg(null);
+                      setRestorePreview(null);
+                      setRestoreMeta(null);
+                      setRestoreFile(e.target.files?.[0] || null);
+                    }}
+                  >
                     {restoreFile ? (
-                      <button
-                        type="button"
-                        title="Remove file"
-                        onClick={clearRestoreWizard}
-                        className="shrink-0 px-3 rounded-lg border border-gray-300 text-sm font-medium text-gray-600 bg-white hover:bg-gray-50"
-                        disabled={restoreMetaBusy || restorePreviewBusy || restoreExecuteBusy}
-                      >
-                        ×
-                      </button>
-                    ) : null}
-                  </div>
-
-                  {restoreMetaBusy && (
-                    <p className="text-center text-xs text-gray-500">Reading backup…</p>
-                  )}
-
-                  {restoreMeta && !restoreMetaBusy && (
-                    <div className="rounded-lg border border-gray-200 bg-white p-3 text-xs space-y-2 text-left">
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <div>
-                          <p className="font-semibold text-gray-800">This backup</p>
-                          <ul className="text-gray-600 space-y-0.5">
-                            <li>When: {restoreMeta.backup_preview?.backed_up_at ? new Date(restoreMeta.backup_preview.backed_up_at).toLocaleString() : '—'}</li>
-                            <li>Leads: {restoreMeta.backup_preview?.lead_count ?? '—'}</li>
-                            <li>Inboxes: {restoreMeta.backup_preview?.inbox_count ?? '—'}</li>
-                            <li>Campaigns: {restoreMeta.backup_preview?.campaign_count ?? '—'}</li>
-                            <li>Users: {restoreMeta.backup_preview?.user_count ?? '—'}</li>
-                            <li>Admins: {(restoreMeta.backup_preview?.admin_emails || []).join(', ') || '—'}</li>
-                            <li>Encrypted: {restoreMeta.encrypted ? 'yes' : 'no'}</li>
-                          </ul>
-                        </div>
-                        <div>
-                          <p className="font-semibold text-gray-800">Current database (will be replaced)</p>
-                          <ul className="text-gray-600 space-y-0.5">
-                            <li>Leads: {restoreMeta.current_database?.lead_count ?? '—'}</li>
-                            <li>Inboxes: {restoreMeta.current_database?.inbox_count ?? '—'}</li>
-                            <li>Campaigns: {restoreMeta.current_database?.campaign_count ?? '—'}</li>
-                            <li>Users: {restoreMeta.current_database?.user_count ?? '—'}</li>
-                            <li>Admins: {(restoreMeta.current_database?.admin_emails || []).join(', ') || '—'}</li>
-                          </ul>
-                        </div>
-                      </div>
-                      {restoreMeta.password_hint ? (
-                        <p className="text-gray-500">
-                          Hint: <span className="font-mono">{restoreMeta.password_hint}</span>
-                        </p>
-                      ) : null}
-                      <p className="text-amber-800 border-t border-amber-100 pt-2 mt-2">
-                        Confirm only if this is the correct backup.
-                      </p>
-                    </div>
-                  )}
-
-                  {restoreMeta && !restorePreview && !restoreMeta.encrypted && (
+                      <span className="truncate text-gray-800">{restoreFile.name}</span>
+                    ) : (
+                      <span className="text-gray-500">Choose backup file (.qbk)</span>
+                    )}
+                  </FileUploadArea>
+                  {restoreFile && (
                     <button
                       type="button"
-                      disabled={restorePreviewBusy || restoreMetaBusy}
-                      className="w-full py-2 px-4 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
+                      onClick={clearRestoreWizard}
+                      className="px-2 text-xs border border-gray-300 rounded"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+
+                {restoreMeta && restoreMeta.encrypted && !restorePreview && (
+                  <div className="space-y-2">
+                    <input
+                      type="password"
+                      placeholder="Backup decryption password"
+                      value={restorePassword}
+                      onChange={e => setRestorePassword(e.target.value)}
+                      className="w-full px-3 py-1.5 text-xs border border-gray-300 rounded"
+                    />
+                    <button
+                      type="button"
+                      disabled={restorePreviewBusy || restorePassword.length < BACKUP_MIN_PASSWORD_LEN}
                       onClick={async () => {
-                        if (!restoreFile) return;
                         setRestorePreviewBusy(true);
-                        setRestoreMsg(null);
-                        setRestorePreview(null);
                         try {
                           const form = new FormData();
                           form.append('file', restoreFile);
+                          form.append('password', restorePassword);
                           const res = await fetch('/api/auth/restore-setup/preview', { method: 'POST', body: form });
-                          const text = await res.text();
-                          let data;
-                          try {
-                            data = JSON.parse(text);
-                          } catch {
-                            data = { detail: text || res.statusText };
-                          }
-                          if (!res.ok) {
-                            throw new Error(parseDetailMessage(text) || res.statusText);
-                          }
-                          setRestorePreview(data);
+                          if (!res.ok) throw new Error(await res.text());
+                          setRestorePreview(await res.json());
                         } catch (e) {
-                          setRestoreMsg({ type: 'err', text: e.message || 'Could not verify backup' });
+                          setRestoreMsg({ type: 'err', text: e.message || 'Invalid password' });
                         } finally {
                           setRestorePreviewBusy(false);
                         }
                       }}
+                      className="w-full py-1 text-xs bg-gray-800 text-white rounded"
                     >
-                      {restorePreviewBusy ? 'Checking…' : 'Verify backup'}
+                      Verify Password
                     </button>
-                  )}
+                  </div>
+                )}
 
-                  {restoreMeta && restoreMeta.encrypted && !restorePreview && (
-                    <>
-                      <input
-                        type="password"
-                        placeholder={`Backup password (at least ${BACKUP_MIN_PASSWORD_LEN} characters)`}
-                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                        value={restorePassword}
-                        onChange={e => setRestorePassword(e.target.value)}
-                        disabled={restorePreviewBusy || restoreExecuteBusy}
-                        autoComplete="off"
-                      />
-                      <button
-                        type="button"
-                        disabled={
-                          restorePreviewBusy ||
-                          !restoreFile ||
-                          restorePassword.length < BACKUP_MIN_PASSWORD_LEN
-                        }
-                        className="w-full py-2 px-4 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
-                        onClick={async () => {
-                          if (!restoreFile) return;
-                          setRestorePreviewBusy(true);
-                          setRestoreMsg(null);
-                          setRestorePreview(null);
-                          try {
-                            const form = new FormData();
-                            form.append('file', restoreFile);
-                            form.append('password', restorePassword);
-                            const res = await fetch('/api/auth/restore-setup/preview', { method: 'POST', body: form });
-                            const text = await res.text();
-                            let data;
-                            try {
-                              data = JSON.parse(text);
-                            } catch {
-                              data = { detail: text || res.statusText };
-                            }
-                            if (!res.ok) {
-                              throw new Error(parseDetailMessage(text) || res.statusText);
-                            }
-                            setRestorePreview(data);
-                          } catch (e) {
-                            setRestoreMsg({ type: 'err', text: e.message || 'Wrong password or invalid backup' });
-                          } finally {
-                            setRestorePreviewBusy(false);
-                          }
-                        }}
-                      >
-                        {restorePreviewBusy ? 'Checking…' : 'Verify password'}
-                      </button>
-                    </>
-                  )}
+                {restorePreview && (
+                  <button
+                    type="button"
+                    disabled={restoreExecuteBusy}
+                    onClick={async () => {
+                      if (!window.confirm('Restore and replace current database?')) return;
+                      setRestoreExecuteBusy(true);
+                      try {
+                        const res = await fetch('/api/auth/restore-setup/execute', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ restore_token: restorePreview.restore_token }),
+                        });
+                        if (!res.ok) throw new Error(await res.text());
+                        window.location.reload();
+                      } catch (e) {
+                        setRestoreMsg({ type: 'err', text: e.message });
+                      } finally {
+                        setRestoreExecuteBusy(false);
+                      }
+                    }}
+                    className="w-full py-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-medium rounded"
+                  >
+                    Execute Restore
+                  </button>
+                )}
 
-                  {restorePreview && (
-                    <div className="rounded-lg border border-gray-200 bg-white p-3 text-xs space-y-2 text-left">
-                      <p className="font-semibold text-gray-800">Verified — full details</p>
-                      <ul className="text-gray-600 space-y-0.5">
-                        <li>When: {restorePreview.backup?.backed_up_at ? new Date(restorePreview.backup.backed_up_at).toLocaleString() : '—'}</li>
-                        <li>Leads: {restorePreview.backup?.lead_count ?? '—'}</li>
-                        <li>Inboxes: {restorePreview.backup?.inbox_count ?? '—'}</li>
-                        <li>Campaigns: {restorePreview.backup?.campaign_count ?? '—'}</li>
-                        <li>Users: {restorePreview.backup?.user_count ?? '—'}</li>
-                        <li>Admins: {(restorePreview.backup?.admin_emails || []).join(', ') || '—'}</li>
-                      </ul>
-                      <button
-                        type="button"
-                        disabled={restoreExecuteBusy}
-                        className="w-full py-2 px-4 rounded-lg text-sm font-medium text-white bg-gray-900 hover:bg-gray-800 disabled:opacity-50"
-                        onClick={async () => {
-                          if (
-                            !window.confirm(
-                              'Replace the database with this backup? This cannot be undone.',
-                            )
-                          ) {
-                            return;
-                          }
-                          setRestoreExecuteBusy(true);
-                          setRestoreMsg(null);
-                          try {
-                            const res = await fetch('/api/auth/restore-setup/execute', {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ restore_token: restorePreview.restore_token }),
-                            });
-                            const text = await res.text();
-                            let data;
-                            try {
-                              data = JSON.parse(text);
-                            } catch {
-                              data = { detail: text || res.statusText };
-                            }
-                            if (!res.ok) {
-                              throw new Error(parseDetailMessage(text) || res.statusText);
-                            }
-                            setRestoreMsg({ type: 'ok', text: data.detail || 'Restore complete. Reloading…' });
-                            setRestorePreview(null);
-                            if (res.headers.get('X-Quickly-Reload') === '1') {
-                              setTimeout(() => window.location.reload(), 300);
-                            }
-                          } catch (e) {
-                            setRestoreMsg({ type: 'err', text: e.message || 'Restore failed' });
-                          } finally {
-                            setRestoreExecuteBusy(false);
-                          }
-                        }}
-                      >
-                        {restoreExecuteBusy ? 'Restoring…' : 'Confirm and restore'}
-                      </button>
-                    </div>
-                  )}
-
-                  {restoreMsg && (
-                    <p
-                      className={`text-center text-xs ${restoreMsg.type === 'ok' ? 'text-green-700' : 'text-red-600'}`}
-                    >
-                      {restoreMsg.text}
-                    </p>
-                  )}
-                </>
-              )}
-            </div>
-          </>
+                {restoreMsg && (
+                  <p className={`text-xs ${restoreMsg.type === 'err' ? 'text-red-500' : 'text-emerald-500'}`}>
+                    {restoreMsg.text}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
         )}
+
+        {/* Footer */}
+        <div className="pt-2 text-center text-[11px] text-gray-400">
+          <p>© {new Date().getFullYear()} <a href="https://weblinxsolution.com" target="_blank" rel="noreferrer" className="text-blue-500 hover:underline">Weblinx Solution</a>. All rights reserved.</p>
+        </div>
+
       </div>
     </div>
   );

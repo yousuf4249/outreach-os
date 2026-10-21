@@ -213,11 +213,35 @@ def _resolve_token(
             return chosen
         return _render_text(chosen, lead_data, context, depth + 1)
 
-    field_match = _FIELD_NAME_RE.match(raw)
+    # Check fallback syntax: {{variable | default}}
+    default_fallback = None
+    token_name = raw
+    if "|" in raw:
+        parts = raw.split("|", 1)
+        token_name = parts[0].strip()
+        default_fallback = parts[1].strip()
+
+    field_match = _FIELD_NAME_RE.match(token_name)
     if field_match:
         key = field_match.group(1)
-        if key in lead_data:
-            return str(lead_data[key])
+        if key in lead_data and lead_data[key] is not None:
+            val = str(lead_data[key])
+            if val.strip() != "":
+                return val
+        if default_fallback is not None:
+            return default_fallback
+        # Safe default handling for known standard outreach variables:
+        # Avoid leaving raw {{first_name}} in emails sent to prospects
+        standard_keys = {
+            "first_name", "last_name", "company_name", "company", "business_name",
+            "industry", "website", "city", "country", "phone", "lead_source", "notes"
+        }
+        if key.lower() in standard_keys:
+            return ""
+
+    if default_fallback is not None:
+        return default_fallback
+
     # Unknown token: still resolve nested placeholders inside it, so a known
     # variable wrapped in otherwise-unknown braces (e.g. "{{ note {{name}} }}")
     # is not silently dropped.  Field values themselves are never recursed.
@@ -282,10 +306,44 @@ def render_body(
 
 
 def get_lead_data(lead) -> Dict[str, Any]:
-    """Build dict for template substitution from a Lead model."""
-    data = {"name": lead.name or "", "email": lead.email or ""}
+    """Build dict for template substitution from a Lead model with standard sales variables."""
+    full_name = getattr(lead, "name", "") or ""
+    parts = full_name.strip().split()
+    first_name = parts[0] if parts else ""
+    last_name = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+    company = getattr(lead, "company", "") or ""
+    data = {
+        "name": full_name,
+        "first_name": first_name,
+        "last_name": last_name,
+        "email": getattr(lead, "email", "") or "",
+        "company": company,
+        "company_name": company,
+        "business_name": company,
+        "phone": getattr(lead, "phone", "") or "",
+        "website": getattr(lead, "website", "") or "",
+        "industry": getattr(lead, "industry", "") or "",
+        "city": getattr(lead, "city", "") or "",
+        "country": getattr(lead, "country", "") or "",
+        "lead_source": getattr(lead, "lead_source", "") or "",
+        "notes": getattr(lead, "notes", "") or "",
+        "pipeline_status": getattr(lead, "pipeline_status", "new") or "new",
+    }
     if getattr(lead, "custom_data", None) and isinstance(lead.custom_data, dict):
-        data.update(lead.custom_data)
+        for k, v in lead.custom_data.items():
+            if v is not None:
+                data[k] = v
+                normalized_k = str(k).lower().replace(" ", "_")
+                data[normalized_k] = v
+    # Allow custom_data to override first_name / company if explicitly provided
+    if hasattr(lead, "custom_data") and isinstance(lead.custom_data, dict):
+        if "first_name" in lead.custom_data:
+            data["first_name"] = str(lead.custom_data["first_name"])
+        if "company_name" in lead.custom_data:
+            data["company_name"] = str(lead.custom_data["company_name"])
+            data["company"] = data["company_name"]
+            data["business_name"] = data["company_name"]
     return data
 
 

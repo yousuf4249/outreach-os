@@ -7,6 +7,7 @@ import { Card } from '../components/ui/Card';
 import { useNotify } from '../context/NotificationContext';
 import { useUniboxNotifications } from '../context/UniboxNotificationsContext';
 import { buildHtmlReply, escapeHtml, formatAttributionDate } from '../utils/emailQuote';
+import { api } from '../api';
 
 const PAGE_SIZE = 25;
 const OLDER_WINDOW_DAYS = 7;
@@ -139,6 +140,8 @@ export default function Unibox() {
   const [autoSyncAttempted, setAutoSyncAttempted] = useState(false);
   // view mode for each message is now determined automatically based on available content (html vs plain)
   const [replyOpen, setReplyOpen] = useState(false);
+  const [threadLead, setThreadLead] = useState(null);
+  const [leadNotes, setLeadNotes] = useState('');
   const listRequestInFlightRef = useRef(false);
   const sseRefreshTimerRef = useRef(null);
   const threadScrollRef = useRef(null);
@@ -258,6 +261,23 @@ export default function Unibox() {
         originalEmail,
         includeQuote: Boolean(originalEmail),
       });
+
+      if (replyTo) {
+        api.get(`/leads?q=${encodeURIComponent(replyTo)}`).then((leads) => {
+          if (Array.isArray(leads) && leads.length > 0) {
+            const found = leads.find((l) => l.email.toLowerCase() === replyTo.toLowerCase()) || leads[0];
+            setThreadLead(found);
+            setLeadNotes(found.notes || '');
+          } else {
+            setThreadLead(null);
+            setLeadNotes('');
+          }
+        }).catch(() => {
+          setThreadLead(null);
+        });
+      } else {
+        setThreadLead(null);
+      }
 
       // no explicit view mode state needed; rendering will choose based on msg fields
       setReplyOpen(false);
@@ -622,12 +642,66 @@ export default function Unibox() {
 
           {selectedThread && !threadLoading && (
             <>
-              <div className="border-b border-gray-200 pb-3 mb-3">
-                <h2 className="text-lg font-semibold truncate">{selectedThread.subject || '(no subject)'}</h2>
-                <p className="text-xs text-gray-500">
+              <div className="border-b border-gray-200 dark:border-slate-800 pb-3 mb-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-1">
+                  <h2 className="text-lg font-semibold truncate text-slate-900 dark:text-white">{selectedThread.subject || '(no subject)'}</h2>
+                </div>
+                <p className="text-xs text-gray-500 dark:text-slate-400">
                   Inbox: {selectedThread.inbox_account || selectedThread.gmail_account} | Last update: {formatDateTime(selectedThread.last_message_timestamp)}
                 </p>
               </div>
+
+              {threadLead && (
+                <div className="mb-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-full bg-primary-100 dark:bg-primary-950/60 text-primary-700 dark:text-primary-300 font-bold flex items-center justify-center text-sm">
+                      {(threadLead.name || threadLead.email)[0].toUpperCase()}
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <Link to={`/leads/${threadLead.id}`} className="font-bold text-sm text-slate-900 dark:text-white hover:underline">
+                          {threadLead.name || threadLead.email}
+                        </Link>
+                        {threadLead.company && (
+                          <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">({threadLead.company})</span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        {[threadLead.city, threadLead.industry].filter(Boolean).join(' • ') || threadLead.email}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">Sales Stage:</span>
+                    <select
+                      value={threadLead.pipeline_status || 'new'}
+                      onChange={async (e) => {
+                        const newStatus = e.target.value;
+                        try {
+                          await api.patch(`/leads/${threadLead.id}`, { pipeline_status: newStatus });
+                          setThreadLead((prev) => ({ ...prev, pipeline_status: newStatus }));
+                          notify({ type: 'success', message: `Sales status updated to ${newStatus.replace(/_/g, ' ')}` });
+                        } catch (err) {
+                          notify({ type: 'error', message: err.message || 'Failed to update sales stage' });
+                        }
+                      }}
+                      className="text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 capitalize text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    >
+                      <option value="new">New</option>
+                      <option value="contacted">Contacted</option>
+                      <option value="follow_up_scheduled">Follow-up Scheduled</option>
+                      <option value="replied">Replied</option>
+                      <option value="interested">Interested (Stops sequence)</option>
+                      <option value="meeting_scheduled">Meeting Scheduled (Stops sequence)</option>
+                      <option value="proposal_sent">Proposal Sent</option>
+                      <option value="won">Won</option>
+                      <option value="lost">Lost</option>
+                      <option value="not_interested">Not Interested (Stops sequence)</option>
+                    </select>
+                  </div>
+                </div>
+              )}
 
               <div ref={threadScrollRef} className="flex-1 min-h-0 overflow-y-auto pr-1">
                 <div className="flex flex-col gap-4 pb-1">

@@ -433,6 +433,20 @@ async def run_send_job():
                 if not campaign_lead_may_receive_sends(cl, lead):
                     await session.delete(slot)
                     continue
+
+                # ── Global suppression check ──
+                from app.routers.suppression import is_email_or_domain_suppressed
+                if await is_email_or_domain_suppressed(session, lead.email):
+                    log.info("Send job: skipping lead %s (globally suppressed)", lead.email)
+                    await session.delete(slot)
+                    continue
+
+                # ── Pipeline status check (stop on interested / won / meeting booked etc.) ──
+                if getattr(lead, "pipeline_status", None) in ("interested", "meeting_scheduled", "proposal_sent", "won", "lost", "not_interested"):
+                    log.info("Send job: skipping lead %s (pipeline_status=%s)", lead.email, lead.pipeline_status)
+                    await session.delete(slot)
+                    continue
+
                 if campaign.stop_on_reply:
                     reply_check = await session.execute(
                         select(LeadReply).where(
@@ -1241,6 +1255,21 @@ async def send_slot_job(slot_id: int) -> None:
                 )
                 await session.commit()
                 return
+
+        # ── Global suppression check ─────────────────────────────────────
+        from app.routers.suppression import is_email_or_domain_suppressed
+        if await is_email_or_domain_suppressed(session, lead.email):
+            log.info("send_slot_job: lead %s is globally suppressed, dropping slot %d", lead.email, slot_id)
+            await session.delete(slot)
+            await session.commit()
+            return
+
+        # ── Pipeline status check ────────────────────────────────────────
+        if getattr(lead, "pipeline_status", None) in ("interested", "meeting_scheduled", "proposal_sent", "won", "lost", "not_interested"):
+            log.info("send_slot_job: lead %s has pipeline status %s, dropping slot %d", lead.email, lead.pipeline_status, slot_id)
+            await session.delete(slot)
+            await session.commit()
+            return
 
         # ── stop_on_reply check ──────────────────────────────────────────
         if campaign.stop_on_reply:

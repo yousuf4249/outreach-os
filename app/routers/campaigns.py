@@ -12,7 +12,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFi
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import selectinload
 from datetime import date
 from typing import List
@@ -198,7 +198,13 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
             )
             .where(
                 LeadReply.campaign_id.in_(campaign_ids),
+                or_(
+                    CampaignLead.interest_status.is_(None),
+                    or_(
+                CampaignLead.interest_status.is_(None),
                 CampaignLead.interest_status.notin_(["out_of_office", "auto_reply"]),
+            ),
+                ),
             )
             .group_by(LeadReply.campaign_id)
         )
@@ -408,7 +414,10 @@ async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
         )
         .where(
             LeadReply.campaign_id == campaign_id,
-            CampaignLead.interest_status.notin_(["out_of_office", "auto_reply"]),
+            or_(
+                CampaignLead.interest_status.is_(None),
+                CampaignLead.interest_status.notin_(["out_of_office", "auto_reply"]),
+            ),
         )
     )
     stats["replies"] = res.scalar() or 0

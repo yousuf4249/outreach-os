@@ -138,6 +138,16 @@ class Lead(Base):
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), nullable=False, index=True)
     name = Column(String(255), default="")
+    company = Column(String(255), default="")
+    phone = Column(String(64), default="")
+    website = Column(String(255), default="")
+    industry = Column(String(128), default="")
+    city = Column(String(128), default="")
+    country = Column(String(128), default="")
+    lead_source = Column(String(128), default="")
+    notes = Column(Text, default="")
+    pipeline_status = Column(String(32), default="new", index=True)
+    tags = Column(JSON, default=list)
     custom_data = Column(JSON, default=dict)  # e.g. {"company": "...", "title": "..."}
     status = Column(String(32), default="active")  # active, unsubscribed, bounced, replied, invalid
     # Email verification: pending, valid, invalid, catch_all, unknown, risky, or null (not verified)
@@ -964,3 +974,35 @@ WEBHOOK_EVENT_TYPES = [
     "token_expired",       # OAuth refresh or SMTP/IMAP login failed (see data.provider/error_type)
     "inbox.send_failing",  # An SMTP inbox failed to send repeatedly (see data.last_send_error)
 ]
+
+class SuppressionList(Base):
+    __tablename__ = "suppression_list"
+    id = Column(Integer, primary_key=True, index=True)
+    email_or_domain = Column(String(255), unique=True, nullable=False, index=True)
+    reason = Column(String(128), default="manual", nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+
+
+class EmailTemplate(Base):
+    __tablename__ = "email_template"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    subject = Column(String(512), nullable=False, default="")
+    body = Column(Text, nullable=False, default="")
+    is_html = Column(Boolean, default=False, nullable=False)
+    preview_text = Column(String(512), nullable=True, default=None)
+    category = Column(String(64), default="Cold Outreach", nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class ImportHistory(Base):
+    __tablename__ = "import_history"
+    id = Column(Integer, primary_key=True, index=True)
+    filename = Column(String(255), nullable=False)
+    total_rows = Column(Integer, default=0, nullable=False)
+    imported_count = Column(Integer, default=0, nullable=False)
+    duplicate_count = Column(Integer, default=0, nullable=False)
+    invalid_count = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+

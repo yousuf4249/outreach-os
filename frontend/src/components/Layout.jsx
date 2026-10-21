@@ -12,7 +12,7 @@ import { OnboardingProvider } from '../context/OnboardingContext';
 
 function LayoutInner({ children, sidebarCollapsed, setSidebarCollapsed }) {
   const { isProduction } = useAppMode();
-  const contentMargin = sidebarCollapsed ? 'ml-16' : 'ml-44';
+  const contentMargin = sidebarCollapsed ? 'ml-16' : 'ml-48';
 
   return (
     <div className="flex h-[100dvh] min-h-0 w-full overflow-hidden">
