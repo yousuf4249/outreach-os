@@ -267,7 +267,7 @@ export default function Analytics() {
             <span className="text-xs font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">Prospects</span>
             <RiUserFollowLine size={16} className="text-primary-500" />
           </div>
-          <div className="text-2xl font-bold text-slate-900 dark:text-white">{s.total_prospects.toLocaleString()}</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-white">{(s.total_prospects ?? 0).toLocaleString()}</div>
           <div className="text-[11px] text-slate-400 mt-0.5">Imported database</div>
         </div>
 
@@ -276,7 +276,7 @@ export default function Analytics() {
             <span className="text-xs font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">Inboxes</span>
             <RiInboxLine size={16} className="text-indigo-500" />
           </div>
-          <div className="text-2xl font-bold text-slate-900 dark:text-white">{s.total_inboxes.toLocaleString()}</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-white">{(s.total_inboxes ?? 0).toLocaleString()}</div>
           <div className="text-[11px] text-slate-400 mt-0.5">Connected senders</div>
         </div>
 
@@ -285,7 +285,7 @@ export default function Analytics() {
             <span className="text-xs font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">Campaigns</span>
             <RiSendPlaneLine size={16} className="text-cyan-500" />
           </div>
-          <div className="text-2xl font-bold text-slate-900 dark:text-white">{s.active_campaigns.toLocaleString()}</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-white">{(s.active_campaigns ?? 0).toLocaleString()}</div>
           <div className="text-[11px] text-slate-400 mt-0.5">Active sequences</div>
         </div>
 
@@ -294,7 +294,7 @@ export default function Analytics() {
             <span className="text-xs font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">Scheduled</span>
             <RiTimeLine size={16} className="text-amber-500" />
           </div>
-          <div className="text-2xl font-bold text-slate-900 dark:text-white">{s.emails_scheduled.toLocaleString()}</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-white">{(s.emails_scheduled ?? 0).toLocaleString()}</div>
           <div className="text-[11px] text-slate-400 mt-0.5">Queued slots</div>
         </div>
 
@@ -303,7 +303,7 @@ export default function Analytics() {
             <span className="text-xs font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">Sent</span>
             <RiMailSendLine size={16} className="text-emerald-500" />
           </div>
-          <div className="text-2xl font-bold text-slate-900 dark:text-white">{s.emails_sent.toLocaleString()}</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-white">{(s.emails_sent ?? 0).toLocaleString()}</div>
           <div className="text-[11px] text-slate-400 mt-0.5">Total dispatched</div>
         </div>
 
@@ -316,8 +316,8 @@ export default function Analytics() {
             <RiEyeLine size={16} className="text-amber-500" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-slate-900 dark:text-white">{s.estimated_opens.toLocaleString()}</span>
-            <span className="text-xs font-semibold text-amber-600 dark:text-amber-400">{s.open_rate}%</span>
+            <span className="text-2xl font-bold text-slate-900 dark:text-white">{(s.estimated_opens ?? s.detected_opens ?? 0).toLocaleString()}</span>
+            <span className="text-xs font-semibold text-amber-600 dark:text-amber-400">{s.open_rate ?? s.open_signal_rate ?? 0}%</span>
           </div>
           <div className="text-[11px] text-slate-400 mt-0.5">Estimated signals</div>
           {/* Tooltip explaining pixel estimation */}
@@ -332,8 +332,8 @@ export default function Analytics() {
             <RiCursorLine size={16} className="text-blue-500" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-slate-900 dark:text-white">{s.link_clicks.toLocaleString()}</span>
-            <span className="text-xs font-semibold text-blue-600 dark:text-blue-400">{s.click_rate}%</span>
+            <span className="text-2xl font-bold text-slate-900 dark:text-white">{(s.link_clicks ?? 0).toLocaleString()}</span>
+            <span className="text-xs font-semibold text-blue-600 dark:text-blue-400">{s.click_rate ?? 0}%</span>
           </div>
           <div className="text-[11px] text-slate-400 mt-0.5">Tracked link clicks</div>
         </div>
@@ -344,8 +344,8 @@ export default function Analytics() {
             <RiChat3Line size={16} className="text-primary-500" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-primary-600 dark:text-primary-400">{s.replies_received.toLocaleString()}</span>
-            <span className="text-xs font-bold text-emerald-600 bg-emerald-100 dark:bg-emerald-950/60 px-1.5 py-0.5 rounded">{s.reply_rate}%</span>
+            <span className="text-2xl font-bold text-primary-600 dark:text-primary-400">{(s.replies_received ?? 0).toLocaleString()}</span>
+            <span className="text-xs font-bold text-emerald-600 bg-emerald-100 dark:bg-emerald-950/60 px-1.5 py-0.5 rounded">{s.reply_rate ?? 0}%</span>
           </div>
           <div className="text-[11px] text-slate-400 mt-0.5">Prospect responses</div>
         </div>
@@ -355,7 +355,7 @@ export default function Analytics() {
             <span className="text-xs font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">Interested</span>
             <RiHeartLine size={16} className="text-rose-500" />
           </div>
-          <div className="text-2xl font-bold text-slate-900 dark:text-white">{s.interested_prospects.toLocaleString()}</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-white">{(s.interested_prospects ?? 0).toLocaleString()}</div>
           <div className="text-[11px] text-slate-400 mt-0.5">Qualified leads</div>
         </div>
 
@@ -364,7 +364,7 @@ export default function Analytics() {
             <span className="text-xs font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">Meetings</span>
             <RiCalendarEventLine size={16} className="text-purple-500" />
           </div>
-          <div className="text-2xl font-bold text-slate-900 dark:text-white">{s.meetings_booked.toLocaleString()}</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-white">{(s.meetings_booked ?? 0).toLocaleString()}</div>
           <div className="text-[11px] text-slate-400 mt-0.5">Booked demos</div>
         </div>
 
@@ -374,8 +374,8 @@ export default function Analytics() {
             <RiAlarmWarningLine size={16} className="text-red-500" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-slate-900 dark:text-white">{s.bounced_emails.toLocaleString()}</span>
-            <span className="text-xs font-semibold text-red-500">{s.bounce_rate}%</span>
+            <span className="text-2xl font-bold text-slate-900 dark:text-white">{(s.bounced_emails ?? 0).toLocaleString()}</span>
+            <span className="text-xs font-semibold text-red-500">{s.bounce_rate ?? 0}%</span>
           </div>
           <div className="text-[11px] text-slate-400 mt-0.5">Suppressed automatically</div>
         </div>
@@ -385,7 +385,7 @@ export default function Analytics() {
             <span className="text-xs font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">Unsubscribed</span>
             <RiUserUnfollowLine size={16} className="text-slate-400" />
           </div>
-          <div className="text-2xl font-bold text-slate-900 dark:text-white">{s.unsubscribed_prospects.toLocaleString()}</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-white">{(s.unsubscribed_prospects ?? 0).toLocaleString()}</div>
           <div className="text-[11px] text-slate-400 mt-0.5">Opted out / stopped</div>
         </div>
       </div>

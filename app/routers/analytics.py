@@ -338,6 +338,9 @@ async def get_dashboard_summary(db: AsyncSession = Depends(get_db)):
         "reply_rate": reply_rate,
         "open_signal_rate": open_signal_rate,
         "click_rate": click_rate,
+        "bounce_rate": bounce_rate,
+        "estimated_opens": detected_opens,
+        "open_rate": open_signal_rate,
         "recent_activity": recent_activity,
         "campaign_performance": campaign_performance,
     }
