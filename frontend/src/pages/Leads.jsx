@@ -8,6 +8,7 @@ import { useNotify } from '../context/NotificationContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { useLoading } from '../context/LoadingContext';
 import { cn } from '../utils/cn';
+import ComposeModal from '../components/ComposeModal';
 import {
   RiUserAddLine,
   RiUploadCloud2Line,
@@ -23,6 +24,7 @@ import {
   RiGlobalLine,
   RiPhoneLine,
   RiPriceTag3Line,
+  RiMailSendLine,
 } from 'react-icons/ri';
 
 const PIPELINE_STATUSES = [
@@ -115,6 +117,15 @@ export default function Leads() {
   const [duplicateAction, setDuplicateAction] = useState('skip');
   const [importCampaignId, setImportCampaignId] = useState('');
   const [importResult, setImportResult] = useState(null);
+
+  // Direct compose state
+  const [composeModalOpen, setComposeModalOpen] = useState(false);
+  const [composeTargetLead, setComposeTargetLead] = useState(null);
+
+  const handleOpenCompose = (lead) => {
+    setComposeTargetLead(lead);
+    setComposeModalOpen(true);
+  };
 
   const notify = useNotify();
   const confirm = useConfirm();
@@ -497,12 +508,13 @@ export default function Leads() {
                 <th className="py-3 px-3">Pipeline Stage</th>
                 <th className="py-3 px-3">Campaign Enrollments</th>
                 <th className="py-3 px-3">Tags</th>
+                <th className="py-3 px-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
               {visibleLeads.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-12 text-center text-slate-400">
+                  <td colSpan={8} className="py-12 text-center text-slate-400">
                     No prospects match the current filter or search query.
                   </td>
                 </tr>
@@ -592,6 +604,17 @@ export default function Leads() {
                           <span className="text-slate-400 text-[10px]">—</span>
                         )}
                       </div>
+                    </td>
+                    <td className="py-3 px-3 text-right whitespace-nowrap">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenCompose(lead)}
+                        title={`Send direct email to ${lead.email}`}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md bg-teal-50 dark:bg-teal-950/40 text-teal-700 dark:text-teal-300 hover:bg-teal-100 dark:hover:bg-teal-900 border border-teal-200 dark:border-teal-800 transition-colors shadow-xs"
+                      >
+                        <RiMailSendLine size={13} />
+                        <span>Send Email</span>
+                      </button>
                     </td>
                   </tr>
                 ))
@@ -915,6 +938,18 @@ export default function Leads() {
           </div>
         </div>
       )}
+      {/* Direct Email Compose Modal */}
+      <ComposeModal
+        isOpen={composeModalOpen}
+        onClose={() => {
+          setComposeModalOpen(false);
+          setComposeTargetLead(null);
+        }}
+        onSent={() => loadLeads()}
+        initialTo={composeTargetLead?.email || ''}
+        initialRecipientName={composeTargetLead?.name || ''}
+        initialLeadId={composeTargetLead?.id || null}
+      />
     </div>
   );
 }

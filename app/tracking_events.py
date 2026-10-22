@@ -102,7 +102,21 @@ async def record_email_open(db: AsyncSession, token: str, ip: str | None) -> boo
     """Persist open event if applicable. Returns True if an open was recorded."""
     email_log = await resolve_email_log_for_open(db, token)
     if not email_log:
-        return False
+        from app.models import DirectEmail
+        de_res = await db.execute(select(DirectEmail).where(DirectEmail.open_token == token))
+        direct_email = de_res.scalar_one_or_none()
+        if not direct_email:
+            return False
+        if await is_known_ip(db, ip):
+            log.debug("open: skipping known IP %s for direct_email_id=%s", ip, direct_email.id)
+            return False
+        direct_email.opened = True
+        if not direct_email.opened_at:
+            direct_email.opened_at = time_provider.utcnow()
+        direct_email.open_count = (direct_email.open_count or 0) + 1
+        await db.commit()
+        log.info("direct_email open recorded: id=%s to=%s", direct_email.id, direct_email.to_email)
+        return True
     if await is_known_ip(db, ip):
         log.debug("open: skipping known IP %s for log_id=%s", ip, email_log.id)
         return False

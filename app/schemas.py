@@ -591,3 +591,46 @@ class DashboardSummaryResponse(BaseModel):
     recent_activity: List[Dict[str, Any]] = []
     campaign_performance: List[Dict[str, Any]] = []
 
+
+
+class DirectEmailCreate(BaseModel):
+    inbox_id: int
+    to_email: str
+    recipient_name: Optional[str] = ''
+    lead_id: Optional[int] = None
+    template_id: Optional[int] = None
+    subject: str
+    body: str
+    is_html: bool = True
+    scheduled_at: Optional[datetime] = None
+    enable_follow_up: bool = False
+    open_tracking: bool = True
+
+
+class DirectEmailResponse(BaseModel):
+    id: int
+    inbox_id: int
+    inbox_email: Optional[str] = ''
+    to_email: str
+    recipient_name: Optional[str] = ''
+    lead_id: Optional[int] = None
+    template_id: Optional[int] = None
+    subject: str
+    body: str
+    is_html: bool
+    status: str
+    scheduled_at: Optional[str] = None
+    sent_at: Optional[str] = None
+    error_message: Optional[str] = None
+    message_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    opened: bool = False
+    opened_at: Optional[str] = None
+    open_count: int = 0
+    replied: bool = False
+    replied_at: Optional[str] = None
+    enable_follow_up: bool = False
+    created_at: str
+
+    class Config:
+        from_attributes = True

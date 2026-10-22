@@ -35,6 +35,13 @@ GMAIL_SCOPE = "https://mail.google.com/"
 USERINFO_EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email"
 
 
+from pydantic import BaseModel
+import os
+
+class GoogleCredentialsSaveRequest(BaseModel):
+    client_id: str
+    client_secret: str
+
 @router.get("/api/gmail/status")
 async def gmail_oauth_status(db: AsyncSession = Depends(get_db)):
     """Check if Google OAuth credentials are configured."""
@@ -43,6 +50,54 @@ async def gmail_oauth_status(db: AsyncSession = Depends(get_db)):
     configured = bool(client_id and client_secret)
     return {
         "configured": configured,
+        "redirect_uri": settings.google_redirect_uri,
+        "client_id": client_id or "",
+    }
+
+@router.post("/api/gmail/credentials")
+async def save_gmail_credentials(
+    body: GoogleCredentialsSaveRequest,
+    _user=Depends(get_current_user),
+):
+    """Save Google OAuth Client ID and Secret to runtime settings and .env file."""
+    cid = body.client_id.strip()
+    sec = body.client_secret.strip()
+    if not cid or not sec:
+        raise HTTPException(status_code=400, detail="Client ID and Client Secret are required.")
+
+    settings.google_client_id = cid
+    settings.google_client_secret = sec
+
+    env_path = ".env"
+    try:
+        lines = []
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        cid_found = False
+        sec_found = False
+        new_lines = []
+        for line in lines:
+            if line.startswith("GOOGLE_CLIENT_ID="):
+                new_lines.append(f"GOOGLE_CLIENT_ID={cid}\n")
+                cid_found = True
+            elif line.startswith("GOOGLE_CLIENT_SECRET="):
+                new_lines.append(f"GOOGLE_CLIENT_SECRET={sec}\n")
+                sec_found = True
+            else:
+                new_lines.append(line)
+        if not cid_found:
+            new_lines.append(f"GOOGLE_CLIENT_ID={cid}\n")
+        if not sec_found:
+            new_lines.append(f"GOOGLE_CLIENT_SECRET={sec}\n")
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+    except Exception as e:
+        log.warning("Could not update .env: %s", e)
+
+    return {
+        "ok": True,
+        "configured": True,
         "redirect_uri": settings.google_redirect_uri,
     }
 

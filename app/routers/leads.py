@@ -8,7 +8,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import delete, exists, or_, select
+from sqlalchemy import delete, exists, or_, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -352,6 +352,26 @@ async def _fetch_lead_interactions(db: AsyncSession, lead_id: int) -> list[dict]
                 "campaign_id": lr.campaign_id,
                 "campaign_name": cname,
                 "campaign_public_id": pub,
+            }
+        )
+
+    # Direct / Compose emails associated with this lead
+    from app.models import DirectEmail
+    de_rows = await db.execute(
+        select(DirectEmail).where(
+            (DirectEmail.lead_id == lead_id) | (func.lower(DirectEmail.to_email) == lead_em)
+        ).order_by(DirectEmail.created_at.asc())
+    )
+    for de in de_rows.scalars().all():
+        events.append(
+            {
+                "direction": "outbound",
+                "kind": f"direct_email ({de.status})",
+                "at": (de.sent_at or de.created_at).isoformat() if (de.sent_at or de.created_at) else None,
+                "subject": de.subject or "",
+                "status": de.status,
+                "opened": de.opened,
+                "snippet": (de.body or "")[:500],
             }
         )
 

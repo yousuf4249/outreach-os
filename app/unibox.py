@@ -946,6 +946,7 @@ async def _upsert_message_from_gmail(
                 _header_value(headers_json, "From")
             ) or (lead.email or "").lower()
 
+            await _mark_direct_email_replied(db, reply_from_addr, thread_id)
             # Mark the thread as a lead thread & unread.
             thread_res = await db.execute(
                 select(GmailThread).where(
@@ -1591,6 +1592,29 @@ def _fetch_smtp_new_messages(
             pass
 
 
+
+async def _mark_direct_email_replied(db: AsyncSession, from_addr: str, thread_id: str | None = None) -> None:
+    """Flag matching direct emails as replied."""
+    if not from_addr and not thread_id:
+        return
+    try:
+        from app.models import DirectEmail
+        from sqlalchemy import or_
+        clauses = []
+        if from_addr:
+            clauses.append(func.lower(DirectEmail.to_email) == from_addr.strip().lower())
+        if thread_id:
+            clauses.append(DirectEmail.thread_id == thread_id)
+        res = await db.execute(
+            select(DirectEmail).where(or_(*clauses), DirectEmail.replied == False)
+        )
+        for de in res.scalars().all():
+            de.replied = True
+            de.replied_at = time_provider.utcnow()
+        await db.commit()
+    except Exception:
+        pass
+
 async def _process_smtp_inbound_message(
     db: AsyncSession,
     *,
@@ -1726,6 +1750,7 @@ async def _process_smtp_inbound_message(
             if lead is not None:
                 campaign_ids_from_thread_only = [cid]
 
+    await _mark_direct_email_replied(db, from_addr, thread_key)
     if lead is not None:
         thread_res = await db.execute(
             select(SmtpThread).where(
@@ -3854,6 +3879,7 @@ async def _detect_o365_lead_replies(
                 Office365Thread.conversation_id == conv_id,
             )
         )
+        await _mark_direct_email_replied(db, from_addr, conv_id)
         thread = thread_res.scalar_one_or_none()
         if thread and not thread.is_lead_thread:
             thread.is_lead_thread = True

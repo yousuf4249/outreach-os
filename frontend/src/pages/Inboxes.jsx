@@ -180,18 +180,38 @@ function SmtpDiagnosticReport({ report, onTrySsl, onTryStarttls, busy }) {
 }
 
 function RedirectUriBlock({ uri, size = 'xs' }) {
+  const [copied, setCopied] = useState(false);
   if (!uri) return null;
   const textCls = size === 'sm' ? 'text-sm' : 'text-xs';
   const codeCls = size === 'sm' ? 'text-xs' : 'text-[11px]';
+
+  const handleCopy = () => {
+    navigator.clipboard?.writeText(uri);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   return (
-    <div className={`text-gray-500 ${textCls} mt-1 min-w-0 w-full max-w-full`}>
-      <span className="block text-[10px] font-medium uppercase tracking-wide text-gray-400 mb-0.5">Redirect URI</span>
+    <div className={`text-gray-500 ${textCls} mt-2 min-w-0 w-full max-w-full bg-slate-50 border border-slate-200 rounded p-2.5`}>
+      <div className="flex items-center justify-between mb-1">
+        <span className="block text-[11px] font-semibold uppercase tracking-wide text-gray-600">Authorized Redirect URI</span>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="text-xs text-blue-600 hover:text-blue-800 font-medium px-2 py-0.5 rounded bg-blue-50 hover:bg-blue-100 border border-blue-200 transition-colors"
+        >
+          {copied ? '✓ Copied' : 'Copy URI'}
+        </button>
+      </div>
       <code
-        className={`block font-mono ${codeCls} leading-snug break-all whitespace-pre-wrap bg-gray-50 rounded px-1.5 py-1 border border-gray-100 max-w-full`}
+        className={`block font-mono ${codeCls} leading-snug break-all whitespace-pre-wrap bg-white rounded px-2 py-1.5 border border-gray-200 max-w-full select-all text-gray-900 font-medium`}
         title={uri}
       >
         {uri}
       </code>
+      <p className="text-[11px] text-gray-500 mt-1.5">
+        Add this exact URI to <strong>Authorized redirect URIs</strong> in Google Cloud Console.
+      </p>
     </div>
   );
 }
@@ -699,6 +719,15 @@ export default function Inboxes() {
   const [addSmtpShowSendTest, setAddSmtpShowSendTest] = useState(false);
   const [oauthConfigured, setOauthConfigured] = useState(false);
   const [redirectUri, setRedirectUri] = useState('');
+  const [googleClientId, setGoogleClientId] = useState('');
+  const [googleClientSecret, setGoogleClientSecret] = useState('');
+  const [savingGoogleCreds, setSavingGoogleCreds] = useState(false);
+  const [googleCredsMsg, setGoogleCredsMsg] = useState(null);
+  const [showGoogleConfig, setShowGoogleConfig] = useState(false);
+  const [inboxMethod, setInboxMethod] = useState('gmail_app_password'); // 'gmail_app_password' | 'gmail_oauth' | 'office365' | 'smtp_custom'
+  const [gmailAppPassword, setGmailAppPassword] = useState('');
+  const [showAppPasswordHelp, setShowAppPasswordHelp] = useState(false);
+  const [showAppPasswordText, setShowAppPasswordText] = useState(false);
   const [o365Configured, setO365Configured] = useState(false);
   const [o365RedirectUri, setO365RedirectUri] = useState('');
   const [editing, setEditing] = useState(null); // inbox being edited
@@ -812,6 +841,7 @@ export default function Inboxes() {
       .then(d => {
         setOauthConfigured(d.configured);
         setRedirectUri(d.redirect_uri || '');
+        if (d.client_id) setGoogleClientId(d.client_id);
       })
       .catch(() => {});
     // check Office 365 OAuth
@@ -877,11 +907,69 @@ export default function Inboxes() {
     setForm(f => ({ ...f, [name]: type === 'number' ? +value : value }));
   };
 
+  const handleMethodChange = (newMethod) => {
+    setInboxMethod(newMethod);
+    setMessage(null);
+    setAddSmtpDiagnose(null);
+    setAddSmtpSendTestMsg(null);
+    setAddSmtpShowSendTest(false);
+
+    if (newMethod === 'gmail_app_password') {
+      const cleanPwd = gmailAppPassword.replace(/\s+/g, '');
+      setForm(f => ({ ...f, provider: 'smtp' }));
+      setSmtpForm(f => ({
+        ...f,
+        smtp_host: 'smtp.gmail.com',
+        smtp_port: 587,
+        smtp_username: form.email || '',
+        smtp_password: cleanPwd,
+        smtp_use_tls: true,
+        smtp_use_ssl: false,
+        imap_host: 'imap.gmail.com',
+        imap_port: 993,
+        imap_username: form.email || '',
+        imap_password: cleanPwd,
+        imap_use_ssl: true,
+      }));
+    } else if (newMethod === 'gmail_oauth') {
+      setForm(f => ({ ...f, provider: 'gmail' }));
+    } else if (newMethod === 'office365') {
+      setForm(f => ({ ...f, provider: 'office365' }));
+    } else if (newMethod === 'smtp_custom') {
+      setForm(f => ({ ...f, provider: 'smtp' }));
+      setSmtpForm(initialSmtpForm);
+    }
+  };
+
+  const handleGmailEmailChange = (val) => {
+    if (message?.type === 'error') setMessage(null);
+    setForm(f => ({ ...f, email: val }));
+    setSmtpForm(f => ({
+      ...f,
+      smtp_username: val,
+      imap_username: val,
+    }));
+  };
+
+  const handleGmailAppPasswordChange = (val) => {
+    if (message?.type === 'error') setMessage(null);
+    setGmailAppPassword(val);
+    const cleaned = val.replace(/\s+/g, '');
+    setSmtpForm(f => ({
+      ...f,
+      smtp_password: cleaned,
+      imap_password: cleaned,
+    }));
+  };
+
   const handleProviderChange = (e) => {
     handleChange(e);
   };
 
   const canSubmit = () => {
+    if (inboxMethod === 'gmail_app_password') {
+      return form.email.trim() !== '' && gmailAppPassword.trim() !== '';
+    }
     if (form.provider === 'gmail' || form.provider === 'office365') {
       // allow click so user receives an error message if OAuth is not configured
       return true;
@@ -890,6 +978,32 @@ export default function Inboxes() {
       return form.email.trim() !== '' && smtpForm.smtp_host.trim() !== '';
     }
     return form.email.trim() !== '';
+  };
+
+  const handleSaveGoogleCreds = async (e) => {
+    if (e) e.preventDefault();
+    if (!googleClientId.trim() || !googleClientSecret.trim()) {
+      setGoogleCredsMsg({ type: 'error', text: 'Both Client ID and Client Secret are required.' });
+      return;
+    }
+    setSavingGoogleCreds(true);
+    setGoogleCredsMsg(null);
+    try {
+      const res = await api.post('/gmail/credentials', {
+        client_id: googleClientId.trim(),
+        client_secret: googleClientSecret.trim(),
+      });
+      if (res.ok) {
+        setOauthConfigured(true);
+        setGoogleCredsMsg({ type: 'success', text: 'Google credentials saved! You can now click "Connect with Google".' });
+      } else {
+        setGoogleCredsMsg({ type: 'error', text: res.detail || 'Failed to save credentials' });
+      }
+    } catch (err) {
+      setGoogleCredsMsg({ type: 'error', text: err.message || 'Failed to save credentials' });
+    } finally {
+      setSavingGoogleCreds(false);
+    }
   };
 
   const submitSmtp = async (inboxPayload, sendTestTo) => {
@@ -947,6 +1061,23 @@ export default function Inboxes() {
   const submit = async (e) => {
     e.preventDefault();
     setMessage(null);
+    if (inboxMethod === 'gmail_app_password') {
+      if (!form.email.trim()) {
+        setMessage({ type: 'error', text: 'Gmail address is required.' });
+        return;
+      }
+      if (!gmailAppPassword.trim()) {
+        setMessage({ type: 'error', text: '16-character Google App Password is required.' });
+        return;
+      }
+      const addDomain = addTrackingMode === 'dns' ? form.tracking_domain.trim() : '';
+      try {
+        await submitSmtp({ ...form, tracking_domain: addDomain || null });
+      } catch (e) {
+        setMessage({ type: 'error', text: e.message });
+      }
+      return;
+    }
     if (form.provider === 'gmail') {
       if (!oauthConfigured) {
         setMessage({
@@ -1269,6 +1400,11 @@ export default function Inboxes() {
   // out exactly what to fill in instead of silently doing nothing.
   const addSmtpMissingFields = () => {
     const missing = [];
+    if (inboxMethod === 'gmail_app_password') {
+      if (!form.email.trim()) missing.push('your Gmail address');
+      if (!gmailAppPassword.trim()) missing.push('your 16-character Google App Password');
+      return missing;
+    }
     if (!form.email.trim()) missing.push('the From email address');
     if (!smtpForm.smtp_host.trim()) missing.push('the SMTP host');
     if (!smtpForm.smtp_username.trim()) missing.push('the SMTP username');
@@ -1557,7 +1693,33 @@ export default function Inboxes() {
       {/* header with add button */}
       <div className="flex justify-between items-center mb-4">
         <h1 className="text-2xl font-bold">Inboxes</h1>
-        <Button variant="default" onClick={() => { setForm(initialForm); setSmtpForm(initialSmtpForm); setAddTrackingMode('app'); setMessage(null); setAddSmtpDiagnose(null); setAddSmtpSendTestMsg(null); setAddSmtpSendTestTo(''); setAddSmtpShowSendTest(false); setShowAdd(true); }}>
+        <Button variant="default" onClick={() => {
+          setInboxMethod('gmail_app_password');
+          setGmailAppPassword('');
+          setShowAppPasswordHelp(false);
+          setShowAppPasswordText(false);
+          setForm({ ...initialForm, provider: 'smtp', max_emails_per_day: 50, wait_minutes_between: 5 });
+          setSmtpForm({
+            smtp_host: 'smtp.gmail.com',
+            smtp_port: 587,
+            smtp_username: '',
+            smtp_password: '',
+            smtp_use_tls: true,
+            smtp_use_ssl: false,
+            imap_host: 'imap.gmail.com',
+            imap_port: 993,
+            imap_username: '',
+            imap_password: '',
+            imap_use_ssl: true,
+          });
+          setAddTrackingMode('app');
+          setMessage(null);
+          setAddSmtpDiagnose(null);
+          setAddSmtpSendTestMsg(null);
+          setAddSmtpSendTestTo('');
+          setAddSmtpShowSendTest(false);
+          setShowAdd(true);
+        }}>
           Add Inbox
         </Button>
       </div>
@@ -2141,20 +2303,137 @@ export default function Inboxes() {
           onMouseDown={e => { addBackdropDown.current = e.target === e.currentTarget; }}
           onClick={() => { if (addBackdropDown.current) { setShowAdd(false); setMessage(null); setAddTrackingMode('app'); setAddSmtpDiagnose(null); setAddSmtpSendTestMsg(null); setAddSmtpShowSendTest(false); } }}
         >
-          <div data-darkreader-ignore className="p-6 rounded-xl shadow-lg w-full min-w-0 max-w-md max-h-[90vh] overflow-y-auto overflow-x-hidden mx-auto" style={{ backgroundColor: 'white' }} onClick={e => e.stopPropagation()}>
-            <h2 className="text-xl font-semibold mb-2">Add Inbox</h2>
-            {message && <div className={message.type === 'error' ? 'text-red-600' : 'text-green-600'}>{message.text}</div>}
+          <div data-darkreader-ignore className="p-6 rounded-xl shadow-xl w-full min-w-0 max-w-lg max-h-[92vh] overflow-y-auto overflow-x-hidden mx-auto" style={{ backgroundColor: 'white' }} onClick={e => e.stopPropagation()}>
+            <h2 className="text-xl font-bold mb-1">Add Inbox</h2>
+            <p className="text-xs text-gray-500 mb-3">Connect inboxes to scale cold outreach and distribute email volume.</p>
+            {message && (
+              <div className={`p-2.5 rounded-lg text-xs font-medium mb-3 ${message.type === 'error' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'}`}>
+                {message.text}
+              </div>
+            )}
             <form onSubmit={submit} className="space-y-4 min-w-0 max-w-full">
               <div>
-                <label className="block text-sm font-medium text-gray-700">Provider</label>
-                <select name="provider" value={form.provider} onChange={handleProviderChange} className="mt-1 block w-full border-gray-300 rounded-md">
-                  <option value="gmail">Gmail / Google Workspace</option>
-                  <option value="office365">Office 365 / Outlook</option>
-                  <option value="smtp">SMTP (any provider)</option>
-                </select>
+                <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wide mb-1.5">Connection Method</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleMethodChange('gmail_app_password')}
+                    className={`p-2.5 text-left rounded-lg border text-xs transition-all ${inboxMethod === 'gmail_app_password' ? 'border-blue-600 bg-blue-50/70 ring-1 ring-blue-600 text-gray-900 font-medium' : 'border-gray-200 hover:border-gray-300 text-gray-600'}`}
+                  >
+                    <div className="font-semibold text-gray-900 flex items-center justify-between">
+                      <span>Gmail (App Password)</span>
+                      <span className="text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-semibold">Recommended</span>
+                    </div>
+                    <p className="text-[11px] text-gray-500 mt-1">Connect immediately with 16-character App Password. No Google Cloud needed.</p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleMethodChange('gmail_oauth')}
+                    className={`p-2.5 text-left rounded-lg border text-xs transition-all ${inboxMethod === 'gmail_oauth' ? 'border-blue-600 bg-blue-50/70 ring-1 ring-blue-600 text-gray-900 font-medium' : 'border-gray-200 hover:border-gray-300 text-gray-600'}`}
+                  >
+                    <div className="font-semibold text-gray-900">Gmail (Google OAuth)</div>
+                    <p className="text-[11px] text-gray-500 mt-1">OAuth 2.0 Web Application credentials via Google Cloud Console.</p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleMethodChange('office365')}
+                    className={`p-2.5 text-left rounded-lg border text-xs transition-all ${inboxMethod === 'office365' ? 'border-blue-600 bg-blue-50/70 ring-1 ring-blue-600 text-gray-900 font-medium' : 'border-gray-200 hover:border-gray-300 text-gray-600'}`}
+                  >
+                    <div className="font-semibold text-gray-900">Microsoft 365 / Outlook</div>
+                    <p className="text-[11px] text-gray-500 mt-1">Microsoft Graph OAuth login for Microsoft 365 or Outlook accounts.</p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleMethodChange('smtp_custom')}
+                    className={`p-2.5 text-left rounded-lg border text-xs transition-all ${inboxMethod === 'smtp_custom' ? 'border-blue-600 bg-blue-50/70 ring-1 ring-blue-600 text-gray-900 font-medium' : 'border-gray-200 hover:border-gray-300 text-gray-600'}`}
+                  >
+                    <div className="font-semibold text-gray-900">Custom SMTP / IMAP</div>
+                    <p className="text-[11px] text-gray-500 mt-1">Custom mail server (Zoho, Mailgun, Amazon SES, private relay).</p>
+                  </button>
+                </div>
               </div>
 
-              {form.provider === 'smtp' && (
+              {inboxMethod === 'gmail_app_password' && (
+                <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-lg space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-blue-900 flex items-center gap-1.5">
+                      <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+                      Gmail App Password Setup
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowAppPasswordHelp(h => !h)}
+                      className="text-[11px] text-blue-700 hover:text-blue-900 underline font-medium"
+                    >
+                      {showAppPasswordHelp ? 'Hide instructions' : 'How to get App Password?'}
+                    </button>
+                  </div>
+
+                  {showAppPasswordHelp && (
+                    <div className="p-2.5 bg-white border border-blue-100 rounded text-xs space-y-1.5 text-gray-700">
+                      <div className="font-semibold text-blue-900">Steps to generate your 16-character App Password:</div>
+                      <ol className="list-decimal list-inside space-y-1 text-[11px] text-gray-600 leading-relaxed pl-1">
+                        <li>Ensure <strong>2-Step Verification</strong> is ON in your <a href="https://myaccount.google.com/security" target="_blank" rel="noreferrer" className="text-blue-600 underline font-medium">Google Security settings</a>.</li>
+                        <li>Open <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noreferrer" className="text-blue-600 underline font-semibold">Google App Passwords</a> directly.</li>
+                        <li>Type App name: <code className="bg-gray-100 px-1 py-0.5 rounded text-gray-800">Weblinx Outreach OS</code> and click <strong>Create</strong>.</li>
+                        <li>Copy the 16-character code (e.g. <code className="bg-amber-50 px-1 py-0.5 rounded text-amber-900 font-mono">abcd efgh ijkl mnop</code>) and paste it below.</li>
+                        <li>In Gmail &rarr; ⚙️ Settings &rarr; <strong>Forwarding and POP/IMAP</strong> &rarr; ensure <strong>IMAP is enabled</strong>.</li>
+                      </ol>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">Gmail Address</label>
+                    <input
+                      type="email"
+                      value={form.email}
+                      onChange={e => handleGmailEmailChange(e.target.value)}
+                      placeholder="you@gmail.com or you@yourdomain.com"
+                      className="mt-1 block w-full border border-gray-300 rounded-md text-sm px-3 py-2 bg-white"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700">16-Character Google App Password</label>
+                    <div className="relative mt-1">
+                      <input
+                        type={showAppPasswordText ? "text" : "password"}
+                        value={gmailAppPassword}
+                        onChange={e => handleGmailAppPasswordChange(e.target.value)}
+                        placeholder="abcd efgh ijkl mnop"
+                        autoComplete="new-password"
+                        className="block w-full border border-gray-300 rounded-md text-sm px-3 py-2 font-mono pr-12 bg-white"
+                        required
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowAppPasswordText(s => !s)}
+                        className="absolute inset-y-0 right-0 pr-3 flex items-center text-xs text-gray-500 hover:text-gray-700 font-medium"
+                      >
+                        {showAppPasswordText ? "Hide" : "Show"}
+                      </button>
+                    </div>
+                    <p className="mt-1 text-[11px] text-gray-500">Spaces are stripped automatically. Stored with AES-Fernet encryption.</p>
+                  </div>
+
+                  <div className="p-2 bg-white/80 rounded border border-blue-100 grid grid-cols-2 gap-2 text-[11px] text-gray-600 font-medium">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span>
+                      <span>SMTP: <strong>smtp.gmail.com:587</strong></span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span>
+                      <span>IMAP: <strong>imap.gmail.com:993</strong></span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {inboxMethod === 'smtp_custom' && (
                 <div>
                   <label className="block text-sm font-medium text-gray-700">Email address</label>
                   <input type="email" name="email" value={form.email} onChange={handleChange} placeholder="you@yourdomain.com" className="mt-1 block w-full border-gray-300 rounded-md" />
@@ -2187,68 +2466,77 @@ export default function Inboxes() {
                 />
                 <p className="mt-1 text-xs text-gray-400">Random 0–N minute delay per send (default 3 min). Set to 0 to disable.</p>
               </div>
-              {form.provider === 'smtp' && (
-                <div className="border rounded p-3 space-y-3 bg-gray-50 min-w-0 max-w-full overflow-hidden">
-                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">SMTP (outbound)</p>
+              {inboxMethod === 'smtp_custom' && (
+                <div className="border rounded-lg p-3 space-y-3 bg-gray-50 min-w-0 max-w-full overflow-hidden">
+                  <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Outbound SMTP Server</p>
                   <div className="grid grid-cols-3 gap-2">
                     <div className="col-span-2">
                       <label className="block text-xs font-medium text-gray-700">Host</label>
-                      <input type="text" value={smtpForm.smtp_host} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, smtp_host: e.target.value })); }} placeholder="mail.yourdomain.com" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                      <input type="text" value={smtpForm.smtp_host} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, smtp_host: e.target.value })); }} placeholder="mail.yourdomain.com" className="mt-1 block w-full border-gray-300 rounded-md text-sm px-2.5 py-1.5" />
                     </div>
                     <div>
                       <label className="block text-xs font-medium text-gray-700">Port</label>
-                      <input type="number" value={smtpForm.smtp_port} onChange={e => setSmtpForm(f => ({ ...f, smtp_port: +e.target.value }))} min={1} max={65535} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                      <input type="number" value={smtpForm.smtp_port} onChange={e => setSmtpForm(f => ({ ...f, smtp_port: +e.target.value }))} min={1} max={65535} className="mt-1 block w-full border-gray-300 rounded-md text-sm px-2.5 py-1.5" />
                     </div>
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-700">Username</label>
-                    <input type="text" value={smtpForm.smtp_username} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, smtp_username: e.target.value })); }} autoComplete="off" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                    <input type="text" value={smtpForm.smtp_username} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, smtp_username: e.target.value })); }} autoComplete="off" className="mt-1 block w-full border-gray-300 rounded-md text-sm px-2.5 py-1.5" />
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-700">Password</label>
-                    <input type="password" value={smtpForm.smtp_password} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, smtp_password: e.target.value })); }} autoComplete="new-password" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                    <input type="password" value={smtpForm.smtp_password} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, smtp_password: e.target.value })); }} autoComplete="new-password" className="mt-1 block w-full border-gray-300 rounded-md text-sm px-2.5 py-1.5" />
                   </div>
-                  <div className="flex gap-4 text-sm text-gray-700">
+                  <div className="flex gap-4 text-xs text-gray-700 font-medium">
                     <label className="flex items-center gap-1.5 cursor-pointer">
                       <input type="checkbox" checked={!!smtpForm.smtp_use_tls} onChange={e => setSmtpForm(f => ({ ...f, smtp_use_tls: e.target.checked, smtp_use_ssl: e.target.checked ? false : f.smtp_use_ssl }))} />
-                      STARTTLS (587)
+                      STARTTLS (Port 587)
                     </label>
                     <label className="flex items-center gap-1.5 cursor-pointer">
                       <input type="checkbox" checked={!!smtpForm.smtp_use_ssl} onChange={e => setSmtpForm(f => ({ ...f, smtp_use_ssl: e.target.checked, smtp_use_tls: e.target.checked ? false : f.smtp_use_tls }))} />
-                      SSL (465)
+                      SSL (Port 465)
                     </label>
                   </div>
-                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide pt-1">IMAP (inbound replies — optional)</p>
+
+                  <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide pt-2 border-t border-gray-200">Inbound IMAP (Reply Detection)</p>
                   <div>
                     <label className="block text-xs font-medium text-gray-700">Host</label>
-                    <input type="text" value={smtpForm.imap_host} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, imap_host: e.target.value })); }} placeholder="Leave empty for send-only" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                    <input type="text" value={smtpForm.imap_host} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, imap_host: e.target.value })); }} placeholder="Leave empty for send-only" className="mt-1 block w-full border-gray-300 rounded-md text-sm px-2.5 py-1.5" />
                   </div>
                   {smtpForm.imap_host.trim() !== '' && (
                     <>
                       <div className="grid grid-cols-3 gap-2">
                         <div>
                           <label className="block text-xs font-medium text-gray-700">Port</label>
-                          <input type="number" value={smtpForm.imap_port} onChange={e => setSmtpForm(f => ({ ...f, imap_port: +e.target.value }))} min={1} max={65535} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                          <input type="number" value={smtpForm.imap_port} onChange={e => setSmtpForm(f => ({ ...f, imap_port: +e.target.value }))} min={1} max={65535} className="mt-1 block w-full border-gray-300 rounded-md text-sm px-2.5 py-1.5" />
                         </div>
                         <div className="col-span-2">
                           <label className="block text-xs font-medium text-gray-700">Username</label>
-                          <input type="text" value={smtpForm.imap_username} onChange={e => setSmtpForm(f => ({ ...f, imap_username: e.target.value }))} autoComplete="off" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                          <input type="text" value={smtpForm.imap_username} onChange={e => setSmtpForm(f => ({ ...f, imap_username: e.target.value }))} autoComplete="off" className="mt-1 block w-full border-gray-300 rounded-md text-sm px-2.5 py-1.5" />
                         </div>
                       </div>
                       <div>
                         <label className="block text-xs font-medium text-gray-700">Password</label>
-                        <input type="password" value={smtpForm.imap_password} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, imap_password: e.target.value })); }} autoComplete="new-password" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                        <input type="password" value={smtpForm.imap_password} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, imap_password: e.target.value })); }} autoComplete="new-password" className="mt-1 block w-full border-gray-300 rounded-md text-sm px-2.5 py-1.5" />
                       </div>
-                      <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-700">
+                      <label className="flex items-center gap-1.5 cursor-pointer text-xs text-gray-700 font-medium">
                         <input type="checkbox" checked={!!smtpForm.imap_use_ssl} onChange={e => setSmtpForm(f => ({ ...f, imap_use_ssl: e.target.checked }))} />
-                        Use SSL (993)
+                        Use SSL (Port 993)
                       </label>
                     </>
                   )}
-                  <p className="text-xs text-gray-400">Connection is tested automatically after the inbox is created.</p>
+                </div>
+              )}
+
+              {(inboxMethod === 'gmail_app_password' || inboxMethod === 'smtp_custom') && (
+                <div className="border border-gray-200 rounded-lg p-3 bg-gray-50/70 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-gray-700 uppercase tracking-wide">Connection Verification</span>
+                    <span className="text-[11px] text-gray-400">Test before connecting</span>
+                  </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <Button type="button" size="sm" variant="default" onClick={runAddSmtpDiagnose} disabled={addSmtpDiagnosing}>
-                      {addSmtpDiagnosing ? 'Diagnosing…' : 'Diagnose'}
+                      {addSmtpDiagnosing ? 'Diagnosing…' : 'Diagnose Connection'}
                     </Button>
                     <Button
                       type="button"
@@ -2257,11 +2545,11 @@ export default function Inboxes() {
                       onClick={() => { setAddSmtpShowSendTest((v) => !v); setAddSmtpSendTestMsg(null); }}
                       disabled={addSmtpSendTestBusy}
                     >
-                      Send test email
+                      Send Test Email
                     </Button>
                   </div>
                   {message?.type === 'error' && addSmtpMissingFields().length > 0 && (
-                    <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">
+                    <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2.5 py-1.5">
                       Fill in {addSmtpMissingFields().join(', ')} first, then Diagnose.
                     </p>
                   )}
@@ -2274,9 +2562,9 @@ export default function Inboxes() {
                     />
                   )}
                   {addSmtpShowSendTest && (
-                    <div className="pt-1 space-y-2">
-                      <p className="text-[11px] text-gray-400">
-                        Creates the inbox, then delivers a real test message.
+                    <div className="pt-2 space-y-2 border-t border-gray-200">
+                      <p className="text-[11px] text-gray-500">
+                        Creates the inbox and sends a real test message to verify outbound delivery.
                       </p>
                       <div className="flex gap-2">
                         <input
@@ -2284,17 +2572,17 @@ export default function Inboxes() {
                           value={addSmtpSendTestTo}
                           onChange={(e) => setAddSmtpSendTestTo(e.target.value)}
                           placeholder={form.email || 'you@example.com'}
-                          className="flex-1 min-w-0 border-gray-300 rounded-md text-sm"
+                          className="flex-1 min-w-0 border-gray-300 rounded-md text-sm px-2.5 py-1.5"
                         />
                         <Button
                           type="button"
                           size="sm"
-                          variant="outline"
+                          variant="secondary"
                           disabled={addSmtpSendTestBusy}
                           onClick={() => {
                             const to = (addSmtpSendTestTo || form.email || '').trim();
                             if (!to || !to.includes('@')) {
-                              setAddSmtpSendTestMsg({ type: 'error', text: 'Enter a recipient email address.' });
+                              setAddSmtpSendTestMsg({ type: 'error', text: 'Enter a valid recipient email address.' });
                               return;
                             }
                             const missing = addSmtpMissingFields();
@@ -2304,20 +2592,20 @@ export default function Inboxes() {
                             }
                             setAddSmtpSendTestTo(to);
                             setAddSmtpSendTestBusy(true);
-                          setAddSmtpSendTestMsg(null);
-                          submitSmtp({ ...form, tracking_domain: addTrackingMode === 'dns' ? form.tracking_domain.trim() || null : null }, to)
-                            .catch((e) => setAddSmtpSendTestMsg({ type: 'error', text: e.message }))
-                            .finally(() => setAddSmtpSendTestBusy(false));
-                        }}
-                      >
-                        {addSmtpSendTestBusy ? 'Sending…' : 'Send'}
-                      </Button>
-                    </div>
-                    {addSmtpSendTestMsg && (
-                      <p className={`text-xs ${addSmtpSendTestMsg.type === 'error' ? 'text-red-600' : 'text-green-600'}`}>
-                        {addSmtpSendTestMsg.text}
-                      </p>
-                    )}
+                            setAddSmtpSendTestMsg(null);
+                            submitSmtp({ ...form, tracking_domain: addTrackingMode === 'dns' ? form.tracking_domain.trim() || null : null }, to)
+                              .catch((e) => setAddSmtpSendTestMsg({ type: 'error', text: e.message }))
+                              .finally(() => setAddSmtpSendTestBusy(false));
+                          }}
+                        >
+                          {addSmtpSendTestBusy ? 'Sending…' : 'Send'}
+                        </Button>
+                      </div>
+                      {addSmtpSendTestMsg && (
+                        <p className={`text-xs p-2 rounded ${addSmtpSendTestMsg.type === 'error' ? 'bg-red-50 text-red-600 border border-red-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'}`}>
+                          {addSmtpSendTestMsg.text}
+                        </p>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2387,14 +2675,117 @@ export default function Inboxes() {
                 </div>
               </div>
               {form.provider === 'gmail' && (
-                <>
-                  {!oauthConfigured && (
-                    <div className="text-red-600">
-                      Google OAuth credentials are not configured. Set the appropriate environment variables (e.g. in `.env`) and restart the server before reloading.
+                <div className="space-y-3">
+                  {!oauthConfigured ? (
+                    <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-lg text-xs space-y-2.5">
+                      <div className="flex items-center gap-1.5 font-semibold text-amber-900">
+                        <svg className="w-4 h-4 text-amber-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                        Google OAuth credentials are not configured
+                      </div>
+                      <p className="text-gray-600 leading-relaxed text-[11px]">
+                        To connect Gmail accounts, enter your OAuth 2.0 Client credentials from the Google Cloud Console below, or save them in your <code className="bg-amber-100 px-1 py-0.5 rounded text-amber-900 font-mono">.env</code> file.
+                      </p>
+
+                      <div className="space-y-2 pt-1">
+                        <div>
+                          <label className="block text-[11px] font-medium text-gray-700">Google Client ID</label>
+                          <input
+                            type="text"
+                            placeholder="e.g. 123456789-xxx.apps.googleusercontent.com"
+                            value={googleClientId}
+                            onChange={(e) => setGoogleClientId(e.target.value)}
+                            className="mt-0.5 block w-full border border-gray-300 rounded px-2.5 py-1.5 text-xs font-mono focus:ring-1 focus:ring-blue-500 focus:border-blue-500 bg-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-medium text-gray-700">Google Client Secret</label>
+                          <input
+                            type="password"
+                            placeholder="GOCSPX-..."
+                            value={googleClientSecret}
+                            onChange={(e) => setGoogleClientSecret(e.target.value)}
+                            className="mt-0.5 block w-full border border-gray-300 rounded px-2.5 py-1.5 text-xs font-mono focus:ring-1 focus:ring-blue-500 focus:border-blue-500 bg-white"
+                          />
+                        </div>
+                        {googleCredsMsg && (
+                          <div className={`text-xs p-2 rounded ${googleCredsMsg.type === 'error' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'}`}>
+                            {googleCredsMsg.text}
+                          </div>
+                        )}
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          disabled={savingGoogleCreds || !googleClientId.trim() || !googleClientSecret.trim()}
+                          onClick={handleSaveGoogleCreds}
+                          className="w-full text-xs py-1.5"
+                        >
+                          {savingGoogleCreds ? 'Saving...' : 'Save & Enable Google OAuth'}
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center justify-between text-xs text-emerald-800">
+                      <span className="flex items-center gap-1.5 font-medium">
+                        <svg className="w-4 h-4 text-emerald-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                        </svg>
+                        Google OAuth is configured and ready
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowGoogleConfig(!showGoogleConfig)}
+                        className="text-emerald-700 hover:text-emerald-900 underline text-[11px]"
+                      >
+                        {showGoogleConfig ? 'Hide settings' : 'Change credentials'}
+                      </button>
                     </div>
                   )}
+
+                  {oauthConfigured && showGoogleConfig && (
+                    <div className="p-3 bg-gray-50 border border-gray-200 rounded-lg text-xs space-y-2">
+                      <div className="text-gray-700 font-medium">Update Google OAuth Credentials</div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-gray-700">Google Client ID</label>
+                        <input
+                          type="text"
+                          value={googleClientId}
+                          onChange={(e) => setGoogleClientId(e.target.value)}
+                          className="mt-0.5 block w-full border border-gray-300 rounded px-2.5 py-1.5 text-xs font-mono bg-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-gray-700">Google Client Secret</label>
+                        <input
+                          type="password"
+                          placeholder="Enter new secret if changing"
+                          value={googleClientSecret}
+                          onChange={(e) => setGoogleClientSecret(e.target.value)}
+                          className="mt-0.5 block w-full border border-gray-300 rounded px-2.5 py-1.5 text-xs font-mono bg-white"
+                        />
+                      </div>
+                      {googleCredsMsg && (
+                        <div className={`text-xs p-2 rounded ${googleCredsMsg.type === 'error' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'}`}>
+                          {googleCredsMsg.text}
+                        </div>
+                      )}
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        disabled={savingGoogleCreds || !googleClientId.trim() || !googleClientSecret.trim()}
+                        onClick={handleSaveGoogleCreds}
+                        className="w-full text-xs py-1.5"
+                      >
+                        {savingGoogleCreds ? 'Saving...' : 'Update Credentials'}
+                      </Button>
+                    </div>
+                  )}
+
                   <RedirectUriBlock uri={redirectUri} size="sm" />
-                </>
+                </div>
               )}
               {form.provider === 'office365' && (
                 <>
@@ -2408,7 +2799,13 @@ export default function Inboxes() {
               )}
               <div className="flex gap-2">
                 <Button type="submit" disabled={!canSubmit()} variant="default">
-                  {form.provider === 'gmail' ? 'Connect with Google' : form.provider === 'office365' ? 'Connect with Microsoft' : 'Add inbox'}
+                  {inboxMethod === 'gmail_app_password'
+                    ? 'Add Inbox (App Password)'
+                    : form.provider === 'gmail'
+                    ? 'Connect with Google'
+                    : form.provider === 'office365'
+                    ? 'Connect with Microsoft'
+                    : 'Add inbox'}
                 </Button>
                 <Button type="button" variant="outline" onClick={() => { setShowAdd(false); setMessage(null); setAddTrackingMode('app'); setAddSmtpDiagnose(null); setAddSmtpSendTestMsg(null); setAddSmtpShowSendTest(false); }}>
                   Cancel

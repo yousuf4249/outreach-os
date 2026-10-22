@@ -1006,3 +1006,43 @@ class ImportHistory(Base):
     invalid_count = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=_utcnow)
 
+
+
+class DirectEmail(Base):
+    """Direct, individual emails sent or scheduled outside of campaigns."""
+    __tablename__ = "direct_email"
+    __table_args__ = (
+        Index("ix_direct_email_status_scheduled", "status", "scheduled_at"),
+        Index("ix_direct_email_to_email", "to_email"),
+        Index("ix_direct_email_lead_id", "lead_id"),
+        Index("ix_direct_email_open_token", "open_token"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), nullable=False)
+    to_email = Column(String(320), nullable=False)
+    recipient_name = Column(String(255), default="")
+    lead_id = Column(Integer, ForeignKey("lead.id", ondelete="SET NULL"), nullable=True)
+    template_id = Column(Integer, ForeignKey("email_template.id", ondelete="SET NULL"), nullable=True)
+    subject = Column(String(512), nullable=False, default="")
+    body = Column(Text, nullable=False, default="")
+    is_html = Column(Boolean, default=True, nullable=False)
+    status = Column(String(32), default="draft", nullable=False)  # draft | scheduled | sending | sent | failed
+    scheduled_at = Column(DateTime, nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+    message_id = Column(String(512), nullable=True)  # RFC 822 Message-ID
+    thread_id = Column(String(512), nullable=True)   # threadId for unibox continuity
+    open_token = Column(String(32), unique=True, nullable=True, default=_make_open_token)
+    opened = Column(Boolean, default=False, nullable=False)
+    opened_at = Column(DateTime, nullable=True)
+    open_count = Column(Integer, default=0, nullable=False)
+    replied = Column(Boolean, default=False, nullable=False)
+    replied_at = Column(DateTime, nullable=True)
+    enable_follow_up = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    inbox = relationship("Inbox")
+    lead = relationship("Lead")
+    template = relationship("EmailTemplate")

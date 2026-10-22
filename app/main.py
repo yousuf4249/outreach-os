@@ -51,6 +51,7 @@ from app.routers import system_health as system_health_router
 from app.routers import analytics as analytics_router
 from app.routers import templates as templates_router
 from app.routers import suppression as suppression_router
+from app.routers import direct_email as direct_email_router
 from app.jobs import run_send_job, run_slot_scan_job, last_send_job_run, last_send_job_sent_count, run_telemetry_heartbeat_job
 from app.unibox import queue_sync_for_all_inboxes, run_unibox_sync_job
 from app import time as time_provider
@@ -124,6 +125,15 @@ async def lifespan(app: FastAPI):
             "interval",
             minutes=1,
             id="slot_scan",
+            replace_existing=True,
+            max_instances=1,
+        )
+        from app.routers.direct_email import run_direct_email_scheduler_job
+        schedule.add_job(
+            run_direct_email_scheduler_job,
+            "interval",
+            seconds=30,
+            id="direct_email_scheduler",
             replace_existing=True,
             max_instances=1,
         )
@@ -270,6 +280,7 @@ app.include_router(system_health_router.router, dependencies=_auth_deps)
 app.include_router(analytics_router.router, dependencies=_auth_deps)
 app.include_router(templates_router.router, dependencies=_auth_deps)
 app.include_router(suppression_router.router, dependencies=_auth_deps)
+app.include_router(direct_email_router.router, dependencies=_auth_deps)
 
 # lightweight public utility for MX-based provider detection
 app.include_router(email_provider_router.router)

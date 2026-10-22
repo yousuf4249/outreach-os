@@ -236,6 +236,7 @@ async def get_dashboard_summary(db: AsyncSession = Depends(get_db)):
     reply_rate = round((replies_received / emails_sent * 100), 2) if emails_sent > 0 else 0.0
     open_signal_rate = round((detected_opens / emails_sent * 100), 2) if emails_sent > 0 else 0.0
     click_rate = round((link_clicks / emails_sent * 100), 2) if emails_sent > 0 else 0.0
+    bounce_rate = round((bounced_emails / emails_sent * 100), 2) if emails_sent > 0 else 0.0
 
     # Recent activity feed (most recent 15 send/reply events)
     recent_activity: list[dict] = []

@@ -1,10 +1,12 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../api';
+import ComposeModal from '../components/ComposeModal';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { useNotify } from '../context/NotificationContext';
 import { useLoading } from '../context/LoadingContext';
+import { RiMailSendLine } from 'react-icons/ri';
 
 function formatDt(iso) {
   if (!iso) return '—';
@@ -18,6 +20,7 @@ export default function LeadDetail() {
   const loading = useLoading();
   const [lead, setLead] = useState(null);
   const [error, setError] = useState(null);
+  const [composeOpen, setComposeOpen] = useState(false);
 
   const load = useCallback(async () => {
     loading.start();
@@ -69,9 +72,19 @@ export default function LeadDetail() {
           <h1 className="text-2xl font-semibold">{lead.name || lead.email}</h1>
           <p className="text-gray-600 mt-1 font-mono text-sm">{lead.email}</p>
         </div>
-        <Button as={Link} to="/unibox" variant="outline" size="sm">
-          Open Unibox
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => setComposeOpen(true)}
+            className="bg-teal-600 hover:bg-teal-700 text-white flex items-center gap-1.5 shadow-sm"
+          >
+            <RiMailSendLine size={16} /> Send Email
+          </Button>
+          <Button as={Link} to="/unibox" variant="outline" size="sm">
+            Open Unibox
+          </Button>
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-2 text-sm">
@@ -190,6 +203,15 @@ export default function LeadDetail() {
           <p className="text-gray-500 text-sm">No interaction history yet.</p>
         )}
       </Card>
+
+      <ComposeModal
+        isOpen={composeOpen}
+        onClose={() => setComposeOpen(false)}
+        onSent={() => load()}
+        initialTo={lead?.email || ''}
+        initialRecipientName={lead?.name || ''}
+        initialLeadId={lead?.id || null}
+      />
     </div>
   );
 }

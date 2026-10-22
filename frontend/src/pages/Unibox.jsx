@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import DOMPurify from 'dompurify';
 import EmailContent from '../components/EmailContent';
+import ComposeModal from '../components/ComposeModal';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { useNotify } from '../context/NotificationContext';
 import { useUniboxNotifications } from '../context/UniboxNotificationsContext';
 import { buildHtmlReply, escapeHtml, formatAttributionDate } from '../utils/emailQuote';
 import { api } from '../api';
+import { RiMailAddLine } from 'react-icons/ri';
 
 const PAGE_SIZE = 25;
 const OLDER_WINDOW_DAYS = 7;
@@ -140,6 +142,7 @@ export default function Unibox() {
   const [autoSyncAttempted, setAutoSyncAttempted] = useState(false);
   // view mode for each message is now determined automatically based on available content (html vs plain)
   const [replyOpen, setReplyOpen] = useState(false);
+  const [composeOpen, setComposeOpen] = useState(false);
   const [threadLead, setThreadLead] = useState(null);
   const [leadNotes, setLeadNotes] = useState('');
   const listRequestInFlightRef = useRef(false);
@@ -530,7 +533,17 @@ export default function Unibox() {
             </span>
           )}
         </div>
+        <div className="flex items-center gap-3">
           <span className="text-sm text-gray-500">Email inbox and replies</span>
+          <Button
+            type="button"
+            onClick={() => setComposeOpen(true)}
+            size="sm"
+            className="bg-teal-600 hover:bg-teal-700 text-white flex items-center gap-1.5 shadow-sm"
+          >
+            <RiMailAddLine size={16} /> Compose Email
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 flex-1 min-h-0">
@@ -827,6 +840,14 @@ export default function Unibox() {
           )}
         </Card>
       </div>
+
+      <ComposeModal
+        isOpen={composeOpen}
+        onClose={() => setComposeOpen(false)}
+        onSent={() => {
+          loadConversations({ silent: true });
+        }}
+      />
     </div>
   );
 }
