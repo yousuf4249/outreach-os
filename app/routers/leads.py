@@ -198,6 +198,7 @@ def _build_leads_stmt(
     bad_only: bool = False,
     interest: str | None = None,
     country: str | None = None,
+    state: str | None = None,
     city: str | None = None,
     industry: str | None = None,
     tag: str | None = None,
@@ -269,13 +270,36 @@ def _build_leads_stmt(
         )
 
     if country and country.strip() and country.strip().lower() != "all":
-        stmt = stmt.where(func.lower(Lead.country) == country.strip().lower())
+        c_low = country.strip().lower()
+        if c_low in ("united states", "usa", "us", "united state"):
+            stmt = stmt.where(func.lower(Lead.country).in_(("united states", "united state", "usa", "us")))
+        elif c_low in ("united kingdom", "uk", "great britain", "england"):
+            stmt = stmt.where(func.lower(Lead.country).in_(("united kingdom", "uk", "great britain", "england")))
+        elif c_low in ("canada", "ca"):
+            stmt = stmt.where(func.lower(Lead.country).in_(("canada", "ca")))
+        elif c_low in ("australia", "au"):
+            stmt = stmt.where(func.lower(Lead.country).in_(("australia", "au")))
+        else:
+            stmt = stmt.where(func.lower(Lead.country) == c_low)
+
+    if state and state.strip() and state.strip().lower() != "all":
+        from app.database import engine
+        state_expr = (
+            func.json_extract_path_text(Lead.custom_data, "state")
+            if engine.dialect.name == "postgresql"
+            else func.json_extract(Lead.custom_data, "$.state")
+        )
+        stmt = stmt.where(func.lower(state_expr) == state.strip().lower())
 
     if city and city.strip() and city.strip().lower() != "all":
         stmt = stmt.where(func.lower(Lead.city) == city.strip().lower())
 
     if industry and industry.strip() and industry.strip().lower() != "all":
-        stmt = stmt.where(func.lower(Lead.industry) == industry.strip().lower())
+        ind_low = industry.strip().lower()
+        if ind_low in ("web design & marketing agency", "web design and marketing agnacy"):
+            stmt = stmt.where(func.lower(Lead.industry).in_(("web design & marketing agency", "web design and marketing agnacy")))
+        else:
+            stmt = stmt.where(func.lower(Lead.industry) == ind_low)
 
     if pipeline_status and pipeline_status.strip() and pipeline_status.strip().lower() != "all":
         stmt = stmt.where(func.lower(Lead.pipeline_status) == pipeline_status.strip().lower())
@@ -747,6 +771,7 @@ async def list_leads(
     ),
     q: str | None = Query(None, description="Search email, name, or company (substring)"),
     country: str | None = Query(None),
+    state: str | None = Query(None),
     city: str | None = Query(None),
     industry: str | None = Query(None),
     tag: str | None = Query(None),
@@ -765,6 +790,7 @@ async def list_leads(
         bad_only=bad_only,
         interest=intr,
         country=country,
+        state=state,
         city=city,
         industry=industry,
         tag=tag,
@@ -796,6 +822,197 @@ async def list_leads(
         )
         for x in leads
     ]
+
+
+
+
+@router.get("/facet-counts")
+async def get_lead_facet_counts(
+    q: str | None = Query(None),
+    country: str | None = Query(None),
+    state: str | None = Query(None),
+    industry: str | None = Query(None),
+    exclude_campaign_id: int | None = Query(None),
+    campaign_id: int | None = Query(None),
+    pipeline_status: str | None = Query(None),
+    email_verification_status: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return accurate, dynamic prospect facet counts for Country, State, and Industry dropdowns.
+    Follows faceted navigation rules: each dropdown calculates against other active filters without
+    improperly applying its own selection.
+    """
+    from app.database import engine
+    state_expr = (
+        func.json_extract_path_text(Lead.custom_data, "state")
+        if engine.dialect.name == "postgresql"
+        else func.json_extract(Lead.custom_data, "$.state")
+    )
+
+    def _build_clauses(skip_country: bool = False, skip_state: bool = False, skip_industry: bool = False):
+        clauses = []
+        if exclude_campaign_id:
+            clauses.append(
+                ~exists(
+                    select(1).select_from(CampaignLead).where(
+                        CampaignLead.lead_id == Lead.id,
+                        CampaignLead.campaign_id == exclude_campaign_id,
+                    )
+                )
+            )
+        if campaign_id:
+            clauses.append(
+                exists(
+                    select(1).select_from(CampaignLead).where(
+                        CampaignLead.lead_id == Lead.id,
+                        CampaignLead.campaign_id == campaign_id,
+                    )
+                )
+            )
+        if q and q.strip():
+            term = f"%{q.strip().lower()}%"
+            clauses.append(
+                or_(
+                    func.lower(Lead.email).ilike(term),
+                    func.lower(Lead.name).ilike(term),
+                    func.lower(Lead.company).ilike(term),
+                )
+            )
+        if pipeline_status and pipeline_status.strip().lower() != "all":
+            clauses.append(func.lower(Lead.pipeline_status) == pipeline_status.strip().lower())
+        if email_verification_status and email_verification_status.strip().lower() != "all":
+            ev_s = email_verification_status.strip().lower()
+            if ev_s in ("unverified", "null", "none"):
+                clauses.append(
+                    or_(
+                        Lead.email_verification_status.is_(None),
+                        Lead.email_verification_status == "",
+                        Lead.email_verification_status == "not_verified",
+                    )
+                )
+            else:
+                clauses.append(func.lower(Lead.email_verification_status) == ev_s)
+
+        if not skip_country and country and country.strip().lower() != "all":
+            c_low = country.strip().lower()
+            if c_low in ("united states", "usa", "us", "united state"):
+                clauses.append(func.lower(Lead.country).in_(("united states", "united state", "usa", "us")))
+            elif c_low in ("united kingdom", "uk", "great britain", "england"):
+                clauses.append(func.lower(Lead.country).in_(("united kingdom", "uk", "great britain", "england")))
+            elif c_low in ("canada", "ca"):
+                clauses.append(func.lower(Lead.country).in_(("canada", "ca")))
+            elif c_low in ("australia", "au"):
+                clauses.append(func.lower(Lead.country).in_(("australia", "au")))
+            else:
+                clauses.append(func.lower(Lead.country) == c_low)
+
+        if not skip_state and state and state.strip().lower() != "all":
+            clauses.append(func.lower(state_expr) == state.strip().lower())
+
+        if not skip_industry and industry and industry.strip().lower() != "all":
+            ind_low = industry.strip().lower()
+            if ind_low in ("web design & marketing agency", "web design and marketing agnacy"):
+                clauses.append(func.lower(Lead.industry).in_(("web design & marketing agency", "web design and marketing agnacy")))
+            else:
+                clauses.append(func.lower(Lead.industry) == ind_low)
+
+        return clauses
+
+    # 1. Total matching leads under ALL active filters
+    all_clauses = _build_clauses()
+    total_matching = await db.scalar(select(func.count(Lead.id)).where(*all_clauses)) or 0
+
+    # 2. Country facet counts (skip country's own filter)
+    country_clauses = _build_clauses(skip_country=True)
+    c_stmt = (
+        select(Lead.country, func.count(Lead.id))
+        .where(*country_clauses, Lead.country.isnot(None), Lead.country != "")
+        .group_by(Lead.country)
+    )
+    c_res = await db.execute(c_stmt)
+    country_map: dict[str, int] = {}
+    for c_val, cnt in c_res.all():
+        if not c_val:
+            continue
+        c_clean = c_val.strip()
+        c_low = c_clean.lower()
+        if c_low in ("usa", "us", "united states", "united state"):
+            norm = "United States"
+        elif c_low in ("uk", "united kingdom", "great britain", "england"):
+            norm = "United Kingdom"
+        elif c_low in ("ca", "canada"):
+            norm = "Canada"
+        elif c_low in ("au", "australia"):
+            norm = "Australia"
+        else:
+            norm = c_clean.title()
+        country_map[norm] = country_map.get(norm, 0) + cnt
+
+    countries_list = [
+        {"name": k, "count": country_map[k]}
+        for k in sorted(country_map.keys())
+    ]
+    all_countries_count = sum(country_map.values())
+
+    # 3. State facet counts (skip state's own filter, but RESPECT country and industry!)
+    state_clauses = _build_clauses(skip_state=True)
+    s_stmt = (
+        select(state_expr, func.count(Lead.id))
+        .where(*state_clauses, state_expr.isnot(None), state_expr != "")
+        .group_by(state_expr)
+    )
+    s_res = await db.execute(s_stmt)
+    state_map: dict[str, int] = {}
+    for s_val, cnt in s_res.all():
+        if not s_val:
+            continue
+        s_clean = str(s_val).strip()
+        state_map[s_clean] = state_map.get(s_clean, 0) + cnt
+
+    states_list = [
+        {"name": k, "count": state_map[k]}
+        for k in sorted(state_map.keys())
+    ]
+    state_all_count = await db.scalar(
+        select(func.count(Lead.id)).where(*state_clauses)
+    ) or 0
+
+    # 4. Industry facet counts (skip industry's own filter, but RESPECT country and state!)
+    industry_clauses = _build_clauses(skip_industry=True)
+    i_stmt = (
+        select(Lead.industry, func.count(Lead.id))
+        .where(*industry_clauses, Lead.industry.isnot(None), Lead.industry != "")
+        .group_by(Lead.industry)
+    )
+    i_res = await db.execute(i_stmt)
+    industry_map: dict[str, int] = {}
+    for i_val, cnt in i_res.all():
+        if not i_val:
+            continue
+        i_clean = str(i_val).strip()
+        if i_clean.lower() == "web design and marketing agnacy":
+            norm = "Web Design & Marketing Agency"
+        else:
+            norm = i_clean
+        industry_map[norm] = industry_map.get(norm, 0) + cnt
+
+    industries_list = [
+        {"name": k, "count": industry_map[k]}
+        for k in sorted(industry_map.keys())
+    ]
+    industry_all_count = await db.scalar(
+        select(func.count(Lead.id)).where(*industry_clauses)
+    ) or 0
+
+    return {
+        "total_matching": total_matching,
+        "all_countries_count": all_countries_count,
+        "state_all_count": state_all_count,
+        "industry_all_count": industry_all_count,
+        "countries": countries_list,
+        "states": states_list,
+        "industries": industries_list,
+    }
 
 
 @router.get("/filter-options")
