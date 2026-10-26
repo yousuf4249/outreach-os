@@ -1,0 +1,7 @@
+name = "weblinx-email-router"
+main = "cloudflare-email-worker.js"
+compatibility_date = "2024-04-01"
+
+[vars]
+FASTAPI_BASE_URL = "https://outreach.weblinxsolution.com"
+# Store WEBHOOK_SECRET using: wrangler secret put WEBHOOK_SECRET

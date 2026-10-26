@@ -412,18 +412,25 @@ async def _check_all_sequences_fit(
         
         simulated_dates.append(current_date)
         
-        # Check if ANY inbox has capacity on this date (including simulated loads)
-        has_capacity = False
-        for inbox_id, inbox_obj, _ in inboxes:
-            # Use the date-specific warmup limit for accurate capacity checking
+    from app.app_settings import get_monthly_sending_budget
+    monthly_budget = await get_monthly_sending_budget(session)
+
+    # Check if ANY inbox has capacity on this date (including simulated loads)
+    has_capacity = False
+    for inbox_id, inbox_obj, _ in inboxes:
+        # When Global Monthly Sending Budget is enabled, do not enforce arbitrary per-inbox
+        # 50/day limit unless genuine warmup ramp-up is enabled.
+        if monthly_budget > 0 and not getattr(inbox_obj, "ramp_up_enabled", False):
+            max_per_day = 999999
+        else:
             max_per_day = compute_effective_daily_limit(inbox_obj, current_date)
-            count = await count_slots_on_date(session, inbox_id, current_date, cache)
-            simulated_key = (inbox_id, current_date)
-            simulated_count = simulated_loads.get(simulated_key, 0)
-            if (count + simulated_count) < max_per_day:
-                has_capacity = True
-                simulated_loads[simulated_key] = simulated_count + 1
-                break
+        count = await count_slots_on_date(session, inbox_id, current_date, cache)
+        simulated_key = (inbox_id, current_date)
+        simulated_count = simulated_loads.get(simulated_key, 0)
+        if (count + simulated_count) < max_per_day:
+            has_capacity = True
+            simulated_loads[simulated_key] = simulated_count + 1
+            break
         
         if not has_capacity:
             # This date is at full capacity for all inboxes
@@ -476,6 +483,9 @@ async def reserve_slots_for_lead(
     if not sequences:
         log.warning("reserve_slots_for_lead: no sequences for campaign %s", campaign.id)
         return
+
+    from app.app_settings import get_monthly_sending_budget
+    monthly_budget = await get_monthly_sending_budget(session)
 
     to_schedule = [
         (i, seq)
@@ -610,10 +620,17 @@ async def reserve_slots_for_lead(
             if locked_inbox_id is not None:
                 candidate_inboxes = [i for i in inboxes if i[0] == locked_inbox_id]
 
+            inbox_capacities = []
+            for i in candidate_inboxes:
+                inbox_obj = i[1]
+                if monthly_budget > 0 and not getattr(inbox_obj, "ramp_up_enabled", False):
+                    inbox_capacities.append((i[0], 999999))
+                else:
+                    inbox_capacities.append((i[0], compute_effective_daily_limit(inbox_obj, current_date)))
+
             picked = await _pick_inbox_with_capacity(
                 session,
-                # Compute the date-specific warmup limit for each candidate inbox
-                [(i[0], compute_effective_daily_limit(i[1], current_date)) for i in candidate_inboxes],
+                inbox_capacities,
                 current_date,
                 round_robin,
                 cache
@@ -639,8 +656,12 @@ async def reserve_slots_for_lead(
                     # First successful assignment defines the lead's inbox for all future slots.
                     locked_inbox_id = inbox_id
                     log.info("Locked lead %s to inbox %s", lead_id, locked_inbox_id)
-                # Get wait_minutes for this specific inbox
-                wait_min = next(i[2] for i in inboxes if i[0] == inbox_id)
+                # Get wait_minutes for this specific inbox or campaign override
+                camp_interval = getattr(campaign, "wait_minutes_between", None)
+                if monthly_budget > 0 and camp_interval is not None and camp_interval > 0:
+                    wait_min = camp_interval
+                else:
+                    wait_min = next(i[2] for i in inboxes if i[0] == inbox_id)
                 pos = await next_available_slot_position(session, inbox_id, current_date, cache)
 
                 scheduled_dt: datetime
@@ -903,9 +924,17 @@ async def _fetch_campaign_scheduling_data(
         .order_by(CampaignInbox.position, CampaignInbox.inbox_id)
     )
     rows = result.all()
+    from app.app_settings import get_monthly_sending_budget
+    monthly_budget = await get_monthly_sending_budget(session)
+    camp_interval = getattr(campaign, "wait_minutes_between", None)
+    default_wait = camp_interval if (monthly_budget > 0 and camp_interval and camp_interval > 0) else None
+
     # Store the full inbox object at index 1 so callers can compute the
     # date-specific warmup limit via compute_effective_daily_limit(inbox_obj, date).
-    inboxes = [(row[1].id, row[1], row[1].wait_minutes_between) for row in rows]
+    inboxes = [
+        (row[1].id, row[1], default_wait if default_wait is not None else row[1].wait_minutes_between)
+        for row in rows
+    ]
 
     result = await session.execute(
         select(Sequence).where(Sequence.campaign_id == campaign_id).order_by(Sequence.position)
@@ -1068,7 +1097,33 @@ async def reserve_slots_for_new_leads_bulk(
         asap_sequences_by_lead = await _get_asap_ready_sequences_for_leads(
             session, campaign_id, campaign_leads, sequences
         )
+
+    # Check prior EmailLogs for this campaign (re-enrolled leads must NEVER restart completed steps)
+    lead_ids_all = [cl.lead_id for cl in campaign_leads]
+    last_sent_by_lead: dict[int, int] = {}
+    last_sent_date_by_lead: dict[int, date] = {}
+    if lead_ids_all:
+        email_log_res = await session.execute(
+            select(
+                EmailLog.lead_id,
+                func.max(EmailLog.sequence_index).label('max_seq'),
+                func.max(EmailLog.sent_at).label('last_sent_at'),
+            )
+            .where(
+                EmailLog.lead_id.in_(lead_ids_all),
+                EmailLog.campaign_id == campaign_id,
+            )
+            .group_by(EmailLog.lead_id)
+        )
+        for row in email_log_res.all():
+            if row.max_seq is not None:
+                last_sent_by_lead[row.lead_id] = row.max_seq
+            if row.last_sent_at:
+                last_sent_date_by_lead[row.lead_id] = row.last_sent_at.date()
+
     for cl in campaign_leads:
+        last_sent = last_sent_by_lead.get(cl.lead_id, -1)
+        lead_start = last_sent_date_by_lead.get(cl.lead_id, base_start)
         effective_inboxes = _filter_inboxes_for_lead_provider(
             inboxes, lead_providers.get(cl.lead_id), match_provider
         )
@@ -1076,8 +1131,8 @@ async def reserve_slots_for_new_leads_bulk(
         await reserve_slots_for_lead(
             session, cl.id, campaign, effective_inboxes, lead_sequences,
             lead_id=cl.lead_id,
-            start_date=base_start,
-            last_sent_sequence_index=-1,  # brand-new leads: schedule everything
+            start_date=lead_start,
+            last_sent_sequence_index=last_sent,
             cache=slot_cache,
         )
 

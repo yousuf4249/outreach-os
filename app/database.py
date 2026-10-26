@@ -78,9 +78,50 @@ async def _run_migrations(conn) -> None:
     # Postgres-only: ADD COLUMN IF NOT EXISTS is not valid on SQLite builds used in CI;
     # tests use create_all() from models (schema already current).
     if conn.dialect.name != "postgresql":
+        if conn.dialect.name == "sqlite":
+            try:
+                res = await conn.execute(text("PRAGMA table_info(direct_email)"))
+                cols = {r[1] for r in res.fetchall()}
+                if "last_opened_at" not in cols:
+                    await conn.execute(text("ALTER TABLE direct_email ADD COLUMN last_opened_at DATETIME NULL"))
+                if "open_history" not in cols:
+                    await conn.execute(text("ALTER TABLE direct_email ADD COLUMN open_history JSON NULL"))
+                if "click_count" not in cols:
+                    await conn.execute(text("ALTER TABLE direct_email ADD COLUMN click_count INTEGER DEFAULT 0"))
+                if "click_history" not in cols:
+                    await conn.execute(text("ALTER TABLE direct_email ADD COLUMN click_history JSON NULL"))
+                res_inbox = await conn.execute(text("PRAGMA table_info(inbox)"))
+                inbox_cols = {r[1] for r in res_inbox.fetchall()}
+                if "inbound_type" not in inbox_cols:
+                    await conn.execute(text("ALTER TABLE inbox ADD COLUMN inbound_type VARCHAR(32) NOT NULL DEFAULT 'imap'"))
+                if "outbound_provider" not in inbox_cols:
+                    await conn.execute(text("ALTER TABLE inbox ADD COLUMN outbound_provider VARCHAR(32) NOT NULL DEFAULT 'smtp'"))
+                res_camp = await conn.execute(text("PRAGMA table_info(campaign)"))
+                camp_cols = {r[1] for r in res_camp.fetchall()}
+                if "archived" not in camp_cols:
+                    await conn.execute(text("ALTER TABLE campaign ADD COLUMN archived BOOLEAN NOT NULL DEFAULT 0"))
+                res_cl = await conn.execute(text("PRAGMA table_info(campaign_lead)"))
+                cl_cols = {r[1] for r in res_cl.fetchall()}
+                if "failure_reason" not in cl_cols:
+                    await conn.execute(text("ALTER TABLE campaign_lead ADD COLUMN failure_reason TEXT NULL"))
+                if "bounce_type" not in cl_cols:
+                    await conn.execute(text("ALTER TABLE campaign_lead ADD COLUMN bounce_type VARCHAR(32) NULL"))
+                await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_lead_email ON lead(email)"))
+                await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_lead ON campaign_lead(campaign_id, lead_id)"))
+            except Exception:
+                pass
         return
 
     pg_alters = [
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS inbound_type VARCHAR(32) NOT NULL DEFAULT 'imap'",
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS outbound_provider VARCHAR(32) NOT NULL DEFAULT 'smtp'",
+        "ALTER TABLE campaign ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE campaign_lead ADD COLUMN IF NOT EXISTS failure_reason TEXT NULL",
+        "ALTER TABLE campaign_lead ADD COLUMN IF NOT EXISTS bounce_type VARCHAR(32) NULL",
+        "ALTER TABLE direct_email ADD COLUMN IF NOT EXISTS last_opened_at TIMESTAMP WITHOUT TIME ZONE NULL",
+        "ALTER TABLE direct_email ADD COLUMN IF NOT EXISTS open_history JSONB DEFAULT '[]'",
+        "ALTER TABLE direct_email ADD COLUMN IF NOT EXISTS click_count INTEGER DEFAULT 0",
+        "ALTER TABLE direct_email ADD COLUMN IF NOT EXISTS click_history JSONB DEFAULT '[]'",
         # 2026-03-24: ramp-up starting number (default 1 preserves old behaviour)
         "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS ramp_up_start INTEGER NOT NULL DEFAULT 1",
         # 2026-03-24: track when ramp-up was last enabled (NULL = use created_at as fallback)
@@ -293,6 +334,12 @@ async def _run_migrations(conn) -> None:
         await conn.execute(text(stmt))
     await conn.execute(
         text("CREATE UNIQUE INDEX IF NOT EXISTS ix_inbox_connect_token ON inbox (connect_token)")
+    )
+    await conn.execute(
+        text("CREATE UNIQUE INDEX IF NOT EXISTS uq_lead_email ON lead (email)")
+    )
+    await conn.execute(
+        text("CREATE UNIQUE INDEX IF NOT EXISTS uq_campaign_lead ON campaign_lead (campaign_id, lead_id)")
     )
     await conn.execute(
         text(

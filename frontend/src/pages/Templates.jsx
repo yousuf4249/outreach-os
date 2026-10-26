@@ -145,7 +145,11 @@ export default function Templates() {
   const handleDelete = async (tmpl) => {
     if (!window.confirm(`Are you sure you want to delete template "${tmpl.name}"?`)) return;
     try {
-      await api.delete(`/templates/${tmpl.id}`);
+      if (typeof api.delete === 'function') {
+        await api.delete(`/templates/${tmpl.id}`);
+      } else {
+        await api.del(`/templates/${tmpl.id}`);
+      }
       await fetchTemplates();
     } catch (err) {
       alert('Failed to delete template: ' + (err.message || 'Unknown error'));

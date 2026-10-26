@@ -399,20 +399,47 @@ def parse_imap_message(raw: bytes) -> dict:
     from_addr = (from_addrs[0].lower() if from_addrs else "")
 
     body_plain, body_html = "", ""
+    attachments = []
     try:
         if msg.is_multipart():
             for part in msg.walk():
                 if part.is_multipart():
                     continue
                 ctype = part.get_content_type()
-                try:
-                    content = part.get_content()
-                except Exception:
-                    continue
-                if ctype == "text/plain" and not body_plain and isinstance(content, str):
-                    body_plain = content
-                elif ctype == "text/html" and not body_html and isinstance(content, str):
-                    body_html = content
+                cdisp = str(part.get("Content-Disposition", "") or "")
+                fname = part.get_filename()
+                cid = part.get("Content-ID", None)
+                if cid:
+                    cid = cid.strip("<>")
+
+                is_att = bool(fname) or ("attachment" in cdisp.lower())
+                if is_att:
+                    try:
+                        p_data = part.get_payload(decode=True)
+                        if p_data is not None:
+                            attachments.append({
+                                "filename": fname or "attachment",
+                                "content_type": ctype or "application/octet-stream",
+                                "size_bytes": len(p_data),
+                                "data": p_data,
+                                "content_id": cid,
+                            })
+                    except Exception:
+                        pass
+                elif ctype == "text/plain" and not body_plain:
+                    try:
+                        content = part.get_content()
+                        if isinstance(content, str):
+                            body_plain = content
+                    except Exception:
+                        pass
+                elif ctype == "text/html" and not body_html:
+                    try:
+                        content = part.get_content()
+                        if isinstance(content, str):
+                            body_html = content
+                    except Exception:
+                        pass
         else:
             try:
                 content = msg.get_content()
@@ -454,4 +481,8 @@ def parse_imap_message(raw: bytes) -> dict:
         "body_html": body_html or "",
         "date": date_dt or datetime.utcnow(),
         "snippet": snippet,
+        "attachments": attachments,
     }
+
+
+parse_mime_message = parse_imap_message

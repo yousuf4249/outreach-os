@@ -1,5 +1,5 @@
 """Pydantic schemas for API and validation."""
-from pydantic import AliasChoices, BaseModel, EmailStr, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field
 from typing import Literal, Optional, Dict, Any, List
 from datetime import datetime, time
 from app.models import WEBHOOK_EVENT_TYPES
@@ -14,6 +14,7 @@ class LeadCampaignInfo(BaseModel):
     campaign_id: int
     campaign_public_id: str
     campaign_name: str
+    campaign_paused: Optional[bool] = False
     enrolled_at: datetime
     # Per-campaign enrollment pipeline
     status: str = "active"
@@ -26,8 +27,7 @@ class LeadCampaignInfo(BaseModel):
     # Inbox that last sent in this campaign, or the next scheduled sender if none yet
     from_inbox_email: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class LeadCreate(BaseModel):
@@ -48,6 +48,7 @@ class LeadCreate(BaseModel):
 
 class LeadUpdate(BaseModel):
     name: Optional[str] = None
+    email: Optional[str] = None
     company: Optional[str] = None
     phone: Optional[str] = None
     website: Optional[str] = None
@@ -92,15 +93,15 @@ class LeadResponse(BaseModel):
     tags: List[str] = Field(default_factory=list)
     custom_data: Dict[str, Any] = Field(default_factory=dict)
     provider: Optional[str] = None
-    # valid | invalid | pending | null (other provider values may still appear in DB)
+    # valid | domain_validated | invalid | risky | catch_all | unknown | pending | null
     email_verification_status: Optional[str] = None
+    email_verification_result: Optional[Dict[str, Any]] = None
     created_at: datetime
     campaigns: List["LeadCampaignInfo"] = []
     # Populated on GET /api/leads/{id} only: merged outbound sends + inbound mirror/reply markers
     interactions: List[Dict[str, Any]] = Field(default_factory=list)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class LeadBulkDeleteRequest(BaseModel):
@@ -123,6 +124,22 @@ class LeadBulkRecoverRequest(BaseModel):
     verify_email: bool = True
 
 
+class LeadExportRequest(BaseModel):
+    scope: str = "all"  # "all", "filtered", "selected"
+    lead_ids: Optional[List[int]] = None
+    q: Optional[str] = None
+    pipeline_status: Optional[str] = None
+    email_verification_status: Optional[str] = None
+    country: Optional[str] = None
+    city: Optional[str] = None
+    industry: Optional[str] = None
+    tag: Optional[str] = None
+    campaign_id: Optional[int] = None
+    status: Optional[str] = None
+    bad_only: bool = False
+    interest: Optional[str] = None
+
+
 class InboxCreate(BaseModel):
     email: str
     display_name: str = ""
@@ -130,6 +147,8 @@ class InboxCreate(BaseModel):
     wait_minutes_between: int = 5
     max_jitter_seconds: int = 180
     provider: INBOX_PROVIDERS = "gmail"  # gmail | office365 | smtp
+    inbound_type: str = "imap"  # imap | webhook
+    outbound_provider: str = "smtp"  # smtp | ses | postmark | resend
     tracking_domain: Optional[str] = None  # custom hostname for tracking links
     ramp_up_enabled: bool = False
     ramp_up_period_days: int = 42
@@ -143,6 +162,8 @@ class InboxUpdate(BaseModel):
     wait_minutes_between: Optional[int] = None
     max_jitter_seconds: Optional[int] = None
     provider: Optional[INBOX_PROVIDERS] = None
+    inbound_type: Optional[str] = None
+    outbound_provider: Optional[str] = None
     tracking_domain: Optional[str] = None  # set to "" to clear
     ramp_up_enabled: Optional[bool] = None
     ramp_up_period_days: Optional[int] = None
@@ -177,6 +198,8 @@ class InboxResponse(BaseModel):
     wait_minutes_between: int
     max_jitter_seconds: int = 180
     provider: str
+    inbound_type: str = "imap"
+    outbound_provider: str = "smtp"
     tracking_domain: Optional[str] = None
     beacon_connected: bool = False
     beacon_base_url: Optional[str] = None
@@ -199,8 +222,44 @@ class InboxResponse(BaseModel):
     last_send_error: str = ""
     last_send_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AttachmentResponse(BaseModel):
+    id: int
+    inbox_id: int
+    message_id: str
+    filename: Optional[str] = None
+    content_type: Optional[str] = None
+    size_bytes: int = 0
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DraftCreate(BaseModel):
+    inbox_id: int
+    thread_id: Optional[str] = None
+    to_email: Optional[str] = None
+    subject: Optional[str] = ""
+    body_html: Optional[str] = ""
+    body_plain: Optional[str] = ""
+    in_reply_to: Optional[str] = None
+
+
+class DraftResponse(BaseModel):
+    id: int
+    inbox_id: int
+    thread_id: Optional[str] = None
+    to_email: Optional[str] = None
+    subject: Optional[str] = ""
+    body_html: Optional[str] = ""
+    body_plain: Optional[str] = ""
+    in_reply_to: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PauseInboxRequest(BaseModel):
@@ -254,8 +313,7 @@ class SequenceVariantResponse(BaseModel):
     enabled: bool
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SequenceCreate(BaseModel):
@@ -301,8 +359,7 @@ class CustomEmailWrite(BaseModel):
     body: Optional[str] = None
     is_html: Optional[bool] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class CampaignCreate(BaseModel):
@@ -351,6 +408,7 @@ class CampaignUpdate(BaseModel):
     timezone: Optional[str] = None
     match_lead_provider: Optional[bool] = None
     custom_sequence_mode: Optional[str] = None
+    archived: Optional[bool] = None
 
 
 class CampaignStats(BaseModel):
@@ -386,8 +444,7 @@ class CampaignStats(BaseModel):
     click_rate: float = 0.0
     needs_custom_email: int = 0
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class CampaignResponse(BaseModel):
@@ -410,14 +467,38 @@ class CampaignResponse(BaseModel):
     timezone: Optional[str] = None
     match_lead_provider: bool = True
     custom_sequence_mode: str = "wait_for_all"
+    archived: bool = False
     created_at: datetime
 
     # new stats object; the frontend can always rely on ``stats`` being
     # present and it initially contains zeros.
     stats: CampaignStats = CampaignStats()
 
-    class Config:
-        from_attributes = True
+
+class BulkCampaignDeleteRequest(BaseModel):
+    campaign_ids: List[int]
+
+
+class BulkCampaignDeleteResponse(BaseModel):
+    ok: bool
+    deleted_count: int
+    deleted_campaigns: List[dict]
+    failed_count: int
+    failed_campaigns: List[dict]
+    message: str
+
+
+class BulkCampaignArchiveRequest(BaseModel):
+    campaign_ids: List[int]
+    archive: bool = True
+
+
+class BulkCampaignArchiveResponse(BaseModel):
+    ok: bool
+    updated_count: int
+    message: str
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AddLeadToCampaign(BaseModel):
@@ -443,8 +524,7 @@ class QueueSlotResponse(BaseModel):
     scheduled_date: datetime
     position_in_day: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class EmailLogResponse(BaseModel):
@@ -455,8 +535,7 @@ class EmailLogResponse(BaseModel):
     sent_at: datetime
     subject: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class MarkReplied(BaseModel):
@@ -473,6 +552,19 @@ class CampaignLeadEnrollmentPatch(BaseModel):
         validation_alias=AliasChoices("interest", "interest_status"),
     )
     sending_paused: Optional[bool] = None
+
+
+class CampaignLeadBulkRemoveRequest(BaseModel):
+    lead_ids: List[int]
+
+
+class CampaignLeadBulkActionRequest(BaseModel):
+    lead_ids: List[int]
+    action: str = Field(..., description="'stop', 'resume', 'pause', or 'unpause'")
+
+
+class CampaignLeadBulkRetryRequest(BaseModel):
+    lead_ids: List[int]
 
 
 # ---------------------------------------------------------------------------
@@ -507,8 +599,7 @@ class WebhookResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ---------------------------------------------------------------------------
 # Weblinx Outreach OS Schemas
@@ -543,8 +634,7 @@ class TemplateResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SuppressionCreate(BaseModel):
@@ -558,13 +648,38 @@ class SuppressionResponse(BaseModel):
     reason: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BulkAssignSummary(BaseModel):
+    total_selected: int
+    eligible: int
+    needs_review: int
+    blocked: int
+    already_enrolled: int
+    other_active_campaigns: int
+    other_active_details: List[Dict[str, Any]] = Field(default_factory=list)
+    blocked_details: List[Dict[str, Any]] = Field(default_factory=list)
+    campaign_id: int
+    campaign_name: str
+    campaign_paused: bool = False
 
 
 class LeadBulkAssignCampaignRequest(BaseModel):
-    lead_ids: List[int]
+    lead_ids: Optional[List[int]] = Field(default_factory=list)
     campaign_id: int
+    select_all_filtered: Optional[bool] = False
+    filters: Optional[Dict[str, Any]] = None
+    dry_run: Optional[bool] = False
+    skip_other_active: Optional[bool] = False
+
+
+class LeadBulkAssignResponse(BaseModel):
+    ok: bool
+    assigned: int
+    already_enrolled: int = 0
+    blocked: int = 0
+    summary: Optional[BulkAssignSummary] = None
 
 
 class LeadBulkPipelineStatusRequest(BaseModel):
@@ -578,6 +693,8 @@ class DashboardSummaryResponse(BaseModel):
     active_campaigns: int
     emails_scheduled: int
     emails_sent: int
+    scheduled_today: Optional[int] = 0
+    sent_today: Optional[int] = 0
     detected_opens: int
     link_clicks: int
     replies_received: int
@@ -590,6 +707,8 @@ class DashboardSummaryResponse(BaseModel):
     click_rate: float
     recent_activity: List[Dict[str, Any]] = []
     campaign_performance: List[Dict[str, Any]] = []
+    scheduler_health: Optional[Dict[str, Any]] = None
+    dispatch_status: Optional[Dict[str, Any]] = None
 
 
 
@@ -604,7 +723,8 @@ class DirectEmailCreate(BaseModel):
     is_html: bool = True
     scheduled_at: Optional[datetime] = None
     enable_follow_up: bool = False
-    open_tracking: bool = True
+    open_tracking: Optional[bool] = None
+    track_opens: bool = True
 
 
 class DirectEmailResponse(BaseModel):
@@ -622,6 +742,7 @@ class DirectEmailResponse(BaseModel):
     scheduled_at: Optional[str] = None
     sent_at: Optional[str] = None
     error_message: Optional[str] = None
+    warning: Optional[str] = None
     message_id: Optional[str] = None
     thread_id: Optional[str] = None
     opened: bool = False
@@ -632,5 +753,22 @@ class DirectEmailResponse(BaseModel):
     enable_follow_up: bool = False
     created_at: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MonthlySendingBudgetResponse(BaseModel):
+    monthly_budget: int
+    sent_this_month: int
+    remaining_budget: int
+    usage_percentage: float
+    is_exhausted: bool
+    billing_period_start: str
+    billing_period_end: str
+    billing_cycle_start_day: int
+    active_inboxes_count: int
+    active_inboxes: List[Dict[str, Any]] = []
+
+
+class MonthlySendingBudgetUpdate(BaseModel):
+    monthly_budget: int
+    billing_cycle_start_day: Optional[int] = None

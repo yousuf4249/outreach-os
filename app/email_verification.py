@@ -170,12 +170,27 @@ class CustomHttpProvider(BaseVerificationProvider):
 
 
 # ── Provider registry ────────────────────────────────────────────────────────
+
+class SelfHostedProvider(BaseVerificationProvider):
+    """Native, self-hosted verification engine (zero external API keys required)."""
+
+    async def verify(self, email: str, api_key: str = "") -> VerificationResult:
+        from app.verification_engine import verify_single_email
+        res = await verify_single_email(email, check_smtp=False)
+        return VerificationResult(
+            email=email,
+            status=res.status,
+            raw=res.to_dict(),
+            message=res.reason,
+        )
+
 PROVIDERS: dict[str, BaseVerificationProvider] = {
+    "self_hosted": SelfHostedProvider(),
     "mailtester_ninja": MailtesterNinjaProvider(),
 }
 
-DEFAULT_PROVIDER = "mailtester_ninja"
-ALL_PROVIDER_NAMES = ["mailtester_ninja", "custom"]
+DEFAULT_PROVIDER = "self_hosted"
+ALL_PROVIDER_NAMES = ["self_hosted", "mailtester_ninja", "custom"]
 
 
 def get_provider(name: str | None = None) -> BaseVerificationProvider:

@@ -325,9 +325,13 @@ async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(data: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
+async def login(data: LoginRequest, response: Response, request: Request, db: AsyncSession = Depends(get_db)):
     """Authenticate and return JWT tokens."""
-    result = await db.execute(select(User).where(User.username == data.username.lower()))
+    result = await db.execute(
+        select(User).where(
+            (User.username == data.username.lower()) | (User.email == data.username.lower())
+        )
+    )
     user = result.scalar_one_or_none()
 
     if not user or not verify_password(data.password, user.password_hash):
@@ -338,13 +342,14 @@ async def login(data: LoginRequest, response: Response, db: AsyncSession = Depen
 
     access_token = create_access_token(user.id, user.role)
     refresh_token = create_refresh_token(user.id, user.role)
+    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
 
     # Set httpOnly cookie for the refresh token scoped to the auth prefix
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        secure=True,
+        secure=is_secure,
         samesite="lax",
         max_age=7 * 24 * 60 * 60,  # 7 days
         path="/api/auth",
@@ -356,7 +361,7 @@ async def login(data: LoginRequest, response: Response, db: AsyncSession = Depen
         key="access_token",
         value=access_token,
         httponly=True,
-        secure=True,
+        secure=is_secure,
         samesite="lax",
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         path="/",
@@ -384,12 +389,13 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
     # Issue new tokens (refresh token rotation)
     new_access = create_access_token(user.id, user.role)
     new_refresh = create_refresh_token(user.id, user.role)
+    is_secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
 
     response.set_cookie(
         key="refresh_token",
         value=new_refresh,
         httponly=True,
-        secure=True,
+        secure=is_secure,
         samesite="lax",
         max_age=7 * 24 * 60 * 60,
         path="/api/auth",
@@ -400,7 +406,7 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
         key="access_token",
         value=new_access,
         httponly=True,
-        secure=True,
+        secure=is_secure,
         samesite="lax",
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         path="/",

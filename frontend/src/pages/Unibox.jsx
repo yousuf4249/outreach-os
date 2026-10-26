@@ -3,13 +3,23 @@ import { useSearchParams, Link } from 'react-router-dom';
 import DOMPurify from 'dompurify';
 import EmailContent from '../components/EmailContent';
 import ComposeModal from '../components/ComposeModal';
+import EmailTrackingCard from '../components/EmailTrackingCard';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { useNotify } from '../context/NotificationContext';
 import { useUniboxNotifications } from '../context/UniboxNotificationsContext';
 import { buildHtmlReply, escapeHtml, formatAttributionDate } from '../utils/emailQuote';
 import { api } from '../api';
-import { RiMailAddLine } from 'react-icons/ri';
+import {
+  RiMailAddLine,
+  RiInboxLine,
+  RiSendPlaneLine,
+  RiDraftLine,
+  RiReplyLine,
+  RiAttachment2,
+  RiShareForwardLine,
+  RiFolder3Line,
+} from 'react-icons/ri';
 
 const PAGE_SIZE = 25;
 const OLDER_WINDOW_DAYS = 7;
@@ -117,6 +127,9 @@ export default function Unibox() {
 
   const [leadsOnly, setLeadsOnly] = useState(true);
   const [leadStatusFilter, setLeadStatusFilter] = useState(''); // '' = all statuses
+  const [trackingFilter, setTrackingFilter] = useState(''); // '' = all tracking statuses
+  const [folder, setFolder] = useState('inbox'); // 'inbox' | 'sent' | 'drafts' | 'replies' | 'all'
+  const [forwardData, setForwardData] = useState({ subject: '', body: '', to: '' });
   const [conversations, setConversations] = useState([]);
   const [total, setTotal] = useState(0);
   // pagination state used for incremental loading only (infinite scroll)
@@ -167,6 +180,14 @@ export default function Unibox() {
     { value: 'auto_reply', label: 'Auto Reply' },
   ];
 
+  const TRACKING_FILTERS = [
+    { value: '', label: 'All Tracking' },
+    { value: 'open_detected', label: 'Open Detected' },
+    { value: 'no_open_detected', label: 'No Open Detected' },
+    { value: 'replied', label: 'Replied' },
+    { value: 'not_tracked', label: 'Not Tracked' },
+  ];
+
   const STATUS_COLORS = {
     active: 'bg-blue-50 text-blue-700 border-blue-200',
     contacted: 'bg-indigo-50 text-indigo-700 border-indigo-200',
@@ -193,9 +214,15 @@ export default function Unibox() {
         setListError('');
       }
       try {
-        const data = await uniboxRequest(
-          `/unibox?page=${requestedPage}&page_size=${PAGE_SIZE}&leads_only=${leadsOnly}${leadStatusFilter ? `&lead_status=${encodeURIComponent(leadStatusFilter)}` : ''}`,
-        );
+        const queryParams = new URLSearchParams();
+        queryParams.set('page', String(requestedPage));
+        queryParams.set('page_size', String(PAGE_SIZE));
+        queryParams.set('leads_only', String(leadsOnly));
+        if (leadStatusFilter) queryParams.set('lead_status', leadStatusFilter);
+        if (trackingFilter) queryParams.set('tracking_filter', trackingFilter);
+        if (folder && folder !== 'all') queryParams.set('folder', folder);
+
+        const data = await uniboxRequest(`/unibox?${queryParams.toString()}`);
         const items = data?.items || [];
         setTotal(data?.total || 0);
         if (append) {
@@ -215,7 +242,7 @@ export default function Unibox() {
         listRequestInFlightRef.current = false;
       }
     },
-    [leadsOnly, leadStatusFilter],
+    [leadsOnly, leadStatusFilter, trackingFilter, folder],
   );
 
   const loadThread = useCallback(async (threadId, inboxId) => {
@@ -444,6 +471,7 @@ export default function Unibox() {
     };
 
     source.addEventListener('unibox.thread.updated', onUpdate);
+    source.addEventListener('unibox.tracking.event', onUpdate);
     source.addEventListener('unibox.sync.status', onSyncStatus);
     // When a lead replies, refresh conversations so the unread thread pins to top.
     source.addEventListener('unibox.notification', () => {
@@ -455,6 +483,7 @@ export default function Unibox() {
 
     return () => {
       source.removeEventListener('unibox.thread.updated', onUpdate);
+      source.removeEventListener('unibox.tracking.event', onUpdate);
       source.removeEventListener('unibox.sync.status', onSyncStatus);
       source.removeEventListener('unibox.notification', () => {});
       source.close();
@@ -548,8 +577,39 @@ export default function Unibox() {
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 flex-1 min-h-0">
         <Card className="xl:col-span-1 flex flex-col min-h-0 overflow-hidden">
-          <div className="flex items-center justify-between border-b border-gray-200 pb-3 mb-3">
-            <h2 className="font-semibold">Conversations</h2>
+          {/* Folder Navigation Tabs */}
+          <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl mb-3">
+            {[
+              { id: 'inbox', label: 'Inbox', icon: RiInboxLine },
+              { id: 'sent', label: 'Sent', icon: RiSendPlaneLine },
+              { id: 'replies', label: 'Replies', icon: RiReplyLine },
+              { id: 'drafts', label: 'Drafts', icon: RiDraftLine },
+              { id: 'all', label: 'All', icon: RiFolder3Line },
+            ].map((tab) => {
+              const Icon = tab.icon;
+              const isActive = folder === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setFolder(tab.id)}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 text-xs font-semibold rounded-lg transition-all ${
+                    isActive
+                      ? 'bg-white dark:bg-slate-900 text-teal-700 dark:text-teal-400 shadow-xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                  }`}
+                >
+                  <Icon size={14} />
+                  <span>{tab.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex items-center justify-between border-b border-gray-200 pb-2 mb-2">
+            <h2 className="font-semibold text-xs uppercase tracking-wider text-slate-500">
+              {folder.toUpperCase()} ({total})
+            </h2>
             <div className="flex items-center gap-2">
               <span className="text-xs text-gray-500">{total} total</span>
               {/* Leads-only filter toggle */}
@@ -570,9 +630,21 @@ export default function Unibox() {
                 value={leadStatusFilter}
                 onChange={e => setLeadStatusFilter(e.target.value)}
                 className="text-xs border rounded-full px-2 py-1 bg-white text-gray-600 focus:outline-none focus:ring-1 focus:ring-teal-300"
+                title="Filter by CRM lead status"
               >
                 {LEAD_STATUSES.map(s => (
                   <option key={s.value} value={s.value}>{s.label}</option>
+                ))}
+              </select>
+              {/* Engagement / Tracking filter */}
+              <select
+                value={trackingFilter}
+                onChange={e => setTrackingFilter(e.target.value)}
+                className="text-xs border rounded-full px-2 py-1 bg-white text-gray-600 focus:outline-none focus:ring-1 focus:ring-teal-300"
+                title="Filter by email tracking engagement"
+              >
+                {TRACKING_FILTERS.map(t => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
                 ))}
               </select>
               {/* <Button variant="outline" size="sm" onClick={triggerSync} disabled={syncing}>
@@ -619,6 +691,33 @@ export default function Unibox() {
                       {item.lead_status && (
                         <span className={`text-[10px] border rounded-full px-1.5 py-0.5 font-medium ${STATUS_COLORS[item.lead_status] || 'bg-gray-100 text-gray-600 border-gray-300'}`}>
                           {item.lead_status.replace(/_/g, ' ')}
+                        </span>
+                      )}
+                      {/* Tracking engagement pill */}
+                      {item.tracking_status && (
+                        <span
+                          className={`text-[10px] border rounded-full px-1.5 py-0.5 font-semibold ${
+                            item.tracking_status === 'open_detected'
+                              ? 'bg-blue-50 text-blue-700 border-blue-200'
+                              : item.tracking_status === 'clicked'
+                              ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                              : item.tracking_status === 'replied'
+                              ? 'bg-purple-50 text-purple-700 border-purple-200'
+                              : item.tracking_status === 'no_open_detected'
+                              ? 'bg-amber-50 text-amber-700 border-amber-200'
+                              : 'bg-gray-100 text-gray-600 border-gray-300'
+                          }`}
+                          title={`Email tracking: ${item.tracking_status.replace(/_/g, ' ')}`}
+                        >
+                          {item.tracking_status === 'open_detected'
+                            ? `Open (${item.tracking_summary?.open_count || 1})`
+                            : item.tracking_status === 'clicked'
+                            ? `Clicked (${item.tracking_summary?.click_count || 1})`
+                            : item.tracking_status === 'replied'
+                            ? 'Replied'
+                            : item.tracking_status === 'no_open_detected'
+                            ? 'No Open'
+                            : 'Not Tracked'}
                         </span>
                       )}
                       {isUnread && (
@@ -745,6 +844,55 @@ export default function Unibox() {
                             {msg.body_plain || msg.snippet || '(no message body)'}
                           </div>
                         )}
+
+                        {/* Message Attachments */}
+                        {msg.attachments && msg.attachments.length > 0 && (
+                          <div className="mt-3 pt-2.5 border-t border-slate-100 dark:border-slate-800">
+                            <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider block mb-1.5">
+                              Attachments ({msg.attachments.length})
+                            </span>
+                            <div className="flex flex-wrap gap-2">
+                              {msg.attachments.map((att) => (
+                                <a
+                                  key={att.id}
+                                  href={`/api/unibox/attachments/${att.id}`}
+                                  download={att.filename}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 transition-colors shadow-2xs"
+                                >
+                                  <RiAttachment2 size={13} className="text-teal-600 dark:text-teal-400" />
+                                  <span className="truncate max-w-[180px] font-medium">{att.filename}</span>
+                                  <span className="text-[10px] text-slate-400 font-mono">
+                                    ({Math.max(1, Math.round((att.size_bytes || 0) / 1024))} KB)
+                                  </span>
+                                </a>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Individual Email Tracking & Engagement History */}
+                        {msg.direction === 'sent' && msg.tracking && (
+                          <EmailTrackingCard tracking={msg.tracking} isSent={true} />
+                        )}
+
+                        {/* Message Action Footer (Forward) */}
+                        <div className="mt-2.5 pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const fwdSub = msg.subject?.startsWith('Fwd:') ? msg.subject : `Fwd: ${msg.subject || ''}`;
+                              const fwdBody = `\n\n---------- Forwarded message ---------\nFrom: ${msg.from || ''}\nDate: ${formatDateTime(msg.timestamp)}\nSubject: ${msg.subject || ''}\nTo: ${msg.to || ''}\n\n${msg.body_plain || ''}`;
+                              setForwardData({ subject: fwdSub, body: fwdBody, to: '' });
+                              setComposeOpen(true);
+                            }}
+                            className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-teal-600 dark:hover:text-teal-400 font-medium py-1 px-2 rounded-md hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                          >
+                            <RiShareForwardLine size={14} />
+                            <span>Forward</span>
+                          </button>
+                        </div>
                     </article>
                   ))}
 
@@ -843,8 +991,16 @@ export default function Unibox() {
 
       <ComposeModal
         isOpen={composeOpen}
-        onClose={() => setComposeOpen(false)}
+        initialSubject={forwardData.subject}
+        initialBody={forwardData.body}
+        initialTo={forwardData.to}
+        onClose={() => {
+          setComposeOpen(false);
+          setForwardData({ subject: '', body: '', to: '' });
+        }}
         onSent={() => {
+          setComposeOpen(false);
+          setForwardData({ subject: '', body: '', to: '' });
           loadConversations({ silent: true });
         }}
       />

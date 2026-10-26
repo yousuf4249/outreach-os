@@ -198,9 +198,13 @@ export const api = {
   put: (path, data) => request(path, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) }),
   patch: (path, data) => request(path, { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) }),
   del: (path) => request(path, { method: 'DELETE' }),
-  upload: async (path, file) => {
-    const form = new FormData();
-    form.append('file', file);
+  delete: (path) => request(path, { method: 'DELETE' }),
+  upload: async (path, fileOrForm) => {
+    const form = fileOrForm instanceof FormData ? fileOrForm : (() => {
+      const f = new FormData();
+      f.append('file', fileOrForm);
+      return f;
+    })();
     const res = await fetch(API_ROOT + path, { method: 'POST', body: form, headers: _authHeaders() });
     if (res.status === 401) {
       try {

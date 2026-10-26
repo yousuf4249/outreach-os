@@ -6,6 +6,7 @@ import { useAppMode } from '../context/AppModeContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { useNotify } from '../context/NotificationContext';
 import { useSystemHealth } from '../context/SystemHealthContext';
+import { DomainHealthModal } from '../components/DomainHealthModal';
 
 /** Backend stores jitter in seconds (cap 600). Forms show minutes and convert on change / save. */
 const JITTER_MAX_MINUTES = 10;
@@ -666,8 +667,11 @@ function InboxTrackingOptions({
 
 export default function Inboxes() {
   const [inboxes, setInboxes] = useState(() => apiCache.get('/inboxes') || []);
+  const [healthModalInbox, setHealthModalInbox] = useState(null);
+  const [deliverabilitySummary, setDeliverabilitySummary] = useState(null);
   const [cnameTarget, setCnameTarget] = useState('');
   const [customTrackingCnameUiEnabled, setCustomTrackingCnameUiEnabled] = useState(true);
+  const [recheckingAll, setRecheckingAll] = useState(false);
   // state used for both add and edit forms
   const initialForm = {
     provider: 'gmail',
@@ -824,11 +828,33 @@ export default function Inboxes() {
     }, 300000);
   };
 
+  const loadDeliverabilitySummary = async () => {
+    try {
+      const sum = await api.get('/deliverability/summary');
+      setDeliverabilitySummary(sum);
+    } catch (e) {
+      console.error('Failed to load deliverability summary', e);
+    }
+  };
+
+  const handleRecheckAllDomains = async () => {
+    setRecheckingAll(true);
+    try {
+      await api.post('/deliverability/recheck-all');
+      await loadDeliverabilitySummary();
+    } catch (e) {
+      console.error('Failed to recheck all domains', e);
+    } finally {
+      setRecheckingAll(false);
+    }
+  };
+
   const load = async () => {
     try {
       const data = await api.get('/inboxes');
       setInboxes(data);
       setSelectedInbox(prev => prev ? (data.find(i => i.id === prev.id) || null) : null);
+      loadDeliverabilitySummary();
     } catch (e) {
       console.error(e);
     }
@@ -1724,6 +1750,77 @@ export default function Inboxes() {
         </Button>
       </div>
 
+      {/* Domain Health & Deliverability Summary Banner */}
+      {deliverabilitySummary && inboxes.length > 0 && (
+        <div className="mb-5">
+          <div className="flex items-center justify-between mb-2.5">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-gray-700 uppercase tracking-wider">
+                Email Authentication & Domain Deliverability
+              </span>
+              <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-medium">
+                {deliverabilitySummary.total_domains || 1} {(deliverabilitySummary.total_domains || 1) === 1 ? 'Domain' : 'Domains'} · {deliverabilitySummary.total_inboxes} {deliverabilitySummary.total_inboxes === 1 ? 'Inbox' : 'Inboxes'}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={handleRecheckAllDomains}
+              disabled={recheckingAll}
+              className="text-xs px-3 py-1 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 font-medium flex items-center gap-1.5 transition-colors shadow-2xs disabled:opacity-60"
+              title="Perform fresh recursive DNS queries across all domains"
+            >
+              <span className={recheckingAll ? 'animate-spin' : ''}>🔄</span>
+              <span>{recheckingAll ? 'Rechecking DNS…' : 'Recheck All Domains'}</span>
+            </button>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3.5">
+            <div className="bg-white border border-gray-200/90 rounded-xl p-3.5 shadow-2xs flex items-center justify-between">
+              <div>
+                <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wider">Total Mailboxes</p>
+                <p className="text-xl font-bold text-gray-900 mt-0.5">{deliverabilitySummary.total_inboxes}</p>
+                <p className="text-[10px] text-gray-400 mt-0.5">{deliverabilitySummary.total_domains || 1} sending {(deliverabilitySummary.total_domains || 1) === 1 ? 'domain' : 'domains'}</p>
+              </div>
+              <div className="w-9 h-9 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center text-base">
+                📬
+              </div>
+            </div>
+
+            <div className="bg-white border border-gray-200/90 rounded-xl p-3.5 shadow-2xs flex items-center justify-between">
+              <div>
+                <p className="text-[11px] font-bold text-emerald-700 uppercase tracking-wider">Healthy Domains</p>
+                <p className="text-xl font-bold text-emerald-700 mt-0.5">{deliverabilitySummary.healthy_domains_count ?? deliverabilitySummary.healthy_count ?? 0}</p>
+                <p className="text-[10px] text-emerald-600 mt-0.5">SPF, DKIM & DMARC valid</p>
+              </div>
+              <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center text-base">
+                ✅
+              </div>
+            </div>
+
+            <div className="bg-white border border-gray-200/90 rounded-xl p-3.5 shadow-2xs flex items-center justify-between">
+              <div>
+                <p className="text-[11px] font-bold text-amber-700 uppercase tracking-wider">Domain Warnings</p>
+                <p className="text-xl font-bold text-amber-700 mt-0.5">{deliverabilitySummary.warning_domains_count ?? deliverabilitySummary.warning_count ?? 0}</p>
+                <p className="text-[10px] text-amber-600 mt-0.5">Requires attention</p>
+              </div>
+              <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center text-base">
+                ⚠️
+              </div>
+            </div>
+
+            <div className="bg-white border border-gray-200/90 rounded-xl p-3.5 shadow-2xs flex items-center justify-between">
+              <div>
+                <p className="text-[11px] font-bold text-rose-700 uppercase tracking-wider">Critical Issues</p>
+                <p className="text-xl font-bold text-rose-700 mt-0.5">{deliverabilitySummary.critical_domains_count ?? deliverabilitySummary.critical_count ?? 0}</p>
+                <p className="text-[10px] text-rose-600 mt-0.5">Authentication failures</p>
+              </div>
+              <div className="w-9 h-9 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center text-base">
+                🚨
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {inboxes.length === 0 && (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <div className="w-14 h-14 rounded-full bg-gray-100 flex items-center justify-center mb-4">
@@ -1780,6 +1877,34 @@ export default function Inboxes() {
                         <span className="font-semibold text-gray-800">{sentToday}</span>
                         <span className="text-gray-400"> / {maxToday} sent</span>
                       </span>
+                      {(() => {
+                        const inboxScanStatus = deliverabilitySummary?.inboxes?.find(i => i.inbox_id === inbox.id)?.overall_status;
+                        const isHealthy = inboxScanStatus === 'healthy';
+                        const isWarning = inboxScanStatus === 'warning';
+                        const isCritical = inboxScanStatus === 'critical';
+                        return (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setHealthModalInbox(inbox);
+                            }}
+                            className={`text-xs px-2.5 py-0.5 rounded-full font-medium border transition-colors flex items-center gap-1 shrink-0 ${
+                              isHealthy
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                                : isWarning
+                                ? 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100'
+                                : isCritical
+                                ? 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100'
+                                : 'border-indigo-200 bg-indigo-50/90 text-indigo-700 hover:bg-indigo-100'
+                            }`}
+                            title="View DNS health, SPF, DKIM, DMARC & Deliverability"
+                          >
+                            <span className="text-[11px]">🛡️</span>
+                            <span>{isHealthy ? 'Domain Healthy' : isWarning ? 'Domain Warning' : isCritical ? 'Domain Critical' : 'Domain Health'}</span>
+                          </button>
+                        );
+                      })()}
                       {inbox.paused
                         ? <span className="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded-full font-medium">Paused</span>
                         : inbox.health === 'failing'
@@ -2258,6 +2383,34 @@ export default function Inboxes() {
 
                   {/* Action buttons */}
                   <div className="px-5 py-4 border-t border-gray-100 space-y-2">
+                    {(() => {
+                      const selScanStatus = deliverabilitySummary?.inboxes?.find(i => i.inbox_id === selectedInbox.id)?.overall_status;
+                      const isHealthy = selScanStatus === 'healthy';
+                      const isWarning = selScanStatus === 'warning';
+                      const isCritical = selScanStatus === 'critical';
+                      return (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className={`w-full flex items-center justify-center gap-1.5 transition-colors ${
+                            isHealthy
+                              ? 'border-emerald-200 text-emerald-800 bg-emerald-50/70 hover:bg-emerald-100'
+                              : isWarning
+                              ? 'border-amber-200 text-amber-800 bg-amber-50/70 hover:bg-amber-100'
+                              : isCritical
+                              ? 'border-rose-200 text-rose-800 bg-rose-50/70 hover:bg-rose-100'
+                              : 'border-indigo-200 text-indigo-700 bg-indigo-50/50 hover:bg-indigo-100'
+                          }`}
+                          onClick={() => setHealthModalInbox(selectedInbox)}
+                        >
+                          <span>🛡️</span>
+                          <span>
+                            Domain Health & Deliverability
+                            {isHealthy ? ' (Healthy)' : isWarning ? ' (Warning)' : isCritical ? ' (Critical)' : ''}
+                          </span>
+                        </Button>
+                      );
+                    })()}
                     <div className="flex gap-2">
                       <Button variant="outline" size="sm" className="flex-1" onClick={() => openEdit(selectedInbox)}>Edit</Button>
                       {selectedInbox.paused
@@ -2902,6 +3055,17 @@ export default function Inboxes() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Domain Health Modal */}
+      {healthModalInbox && (
+        <DomainHealthModal
+          inbox={healthModalInbox}
+          onClose={() => {
+            setHealthModalInbox(null);
+            loadDeliverabilitySummary();
+          }}
+        />
       )}
     </div>
   );

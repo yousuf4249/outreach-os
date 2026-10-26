@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Auth Helper</title>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token');
+    const redirect = params.get('redirect') || '/leads';
+    if (token) {
+      localStorage.setItem('access_token', token);
+      sessionStorage.setItem('access_token', token);
+    }
+    localStorage.setItem('onboardingCompleted', 'true');
+    window.location.href = redirect;
+  </script>
+</head>
+<body>
+  Authenticating and redirecting...
+</body>
+</html>

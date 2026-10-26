@@ -13,6 +13,7 @@ import DeliverabilityTips from './pages/DeliverabilityTips';
 import SystemHealth from './pages/SystemHealth';
 import Leads from './pages/Leads';
 import LeadDetail from './pages/LeadDetail';
+import ProspectResearch from './pages/ProspectResearch';
 import Templates from './pages/Templates';
 import Notifications from './pages/Notifications';
 import Login from './pages/Login';
@@ -22,6 +23,7 @@ import SplashScreen from './components/SplashScreen';
 import { DarkModeProvider } from './context/DarkModeContext';
 import { SystemHealthProvider } from './context/SystemHealthContext';
 import { NotificationsProvider } from './context/NotificationsContext';
+import ErrorBoundary from './components/ErrorBoundary';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -56,24 +58,27 @@ function AppRoutes() {
       <Route path="/*" element={
         <ProtectedRoute>
           <Layout>
-            <Routes>
-              <Route path="/" element={<Analytics />} />
-              <Route path="/campaigns" element={<Campaigns />} />
-              <Route path="/campaigns/add" element={<AddCampaign />} />
-              <Route path="/campaigns/:id" element={<CampaignDetail />} />
-              <Route path="/leads" element={<Leads />} />
-              <Route path="/leads/:id" element={<LeadDetail />} />
-              <Route path="/templates" element={<Templates />} />
-              <Route path="/inboxes" element={<Inboxes />} />
-              <Route path="/unibox" element={<Unibox />} />
-              <Route path="/schedule" element={<Schedule />} />
-              <Route path="/analytics" element={<Analytics />} />
-              <Route path="/settings" element={<Settings />} />
-              <Route path="/deliverability-tips" element={<DeliverabilityTips />} />
-              <Route path="/system-health" element={<SystemHealth />} />
-              <Route path="/notifications" element={<Notifications />} />
-              <Route path="*" element={<Navigate to="/" />} />
-            </Routes>
+            <ErrorBoundary>
+              <Routes>
+                <Route path="/" element={<Analytics />} />
+                <Route path="/campaigns" element={<Campaigns />} />
+                <Route path="/campaigns/add" element={<AddCampaign />} />
+                <Route path="/campaigns/:id" element={<CampaignDetail />} />
+                <Route path="/leads" element={<Leads />} />
+                <Route path="/leads/:id" element={<LeadDetail />} />
+                <Route path="/prospect-research" element={<ProspectResearch />} />
+                <Route path="/templates" element={<Templates />} />
+                <Route path="/inboxes" element={<Inboxes />} />
+                <Route path="/unibox" element={<Unibox />} />
+                <Route path="/schedule" element={<Schedule />} />
+                <Route path="/analytics" element={<Analytics />} />
+                <Route path="/settings" element={<Settings />} />
+                <Route path="/deliverability-tips" element={<DeliverabilityTips />} />
+                <Route path="/system-health" element={<SystemHealth />} />
+                <Route path="/notifications" element={<Notifications />} />
+                <Route path="*" element={<Navigate to="/" />} />
+              </Routes>
+            </ErrorBoundary>
           </Layout>
         </ProtectedRoute>
       } />

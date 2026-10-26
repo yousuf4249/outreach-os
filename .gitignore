@@ -1,16 +1,29 @@
 # Environment and secrets
 .env
 .env_dev
+.env.local
+.env.production
 
 # Database
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
+data/research_exports/
+data/attachments/
 
 # Node
 node_modules/
+frontend/dist/
+dist/
 
 # Logs
 logs/
+*.log
+
+# Scratch & temporary testing files
+scratch/
+temp/
 
 # Python
 __pycache__/
@@ -18,10 +31,9 @@ __pycache__/
 venv/
 *.pyc
 .idea/
-temp/
+.pytest_cache/
 
 # Local DB dumps from Settings → Backup (Docker Compose dev)
-
 backups/
 
 # Caddy TLS certificates (persisted locally to avoid Let's Encrypt rate limits)

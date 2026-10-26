@@ -57,16 +57,97 @@ class SendResult:
 
 @dataclass
 class SendFailure:
-    """Returned when sending fails permanently (e.g. bounce, invalid recipient).
+    """Returned when sending fails.
 
-    Callers should NOT retry the send.  The lead should be marked with the
-    appropriate status (e.g. ``bounced``) and remaining queue slots deleted.
+    Callers should handle error_type:
+    - "bounce", "invalid_recipient": recipient rejected.
+    - "temporary_failure": temporary provider/quota/rate-limit error (eligible for retry).
+    - "auth_failed", "permission_denied": sender credentials/relay error.
     """
-    error_type: str   # "bounce", "invalid_recipient", "permission_denied", "auth_failed"
+    error_type: str   # "bounce", "invalid_recipient", "permission_denied", "auth_failed", "temporary_failure"
     message: str
+    bounce_type: str = "hard_bounce"  # "hard_bounce", "soft_bounce", "temporary_failure"
 
     def __bool__(self):
         return False
+
+
+@dataclass
+class SendUncertain:
+    """Returned when SMTP transmission outcome is ambiguous.
+
+    E.g. Connection dropped, timed out, or SMTPServerDisconnected during or
+    immediately after DATA command transmission, meaning the remote server
+    may have accepted and dispatched the email despite the socket error.
+    """
+    message_id: str
+    thread_id: Optional[str] = None
+    reason: str = "ambiguous_smtp_disconnect"
+
+    def __bool__(self):
+        return False
+
+
+def classify_smtp_error(code: int, err_text: str) -> tuple[str, str]:
+    """Distinguish temporary provider/quota/rate-limit errors from confirmed hard recipient bounces.
+
+    Returns (error_type, bounce_type).
+    """
+    lower_err = (err_text or "").lower()
+
+    # Temporary / transient / quota / rate-limit signals
+    temp_keywords = (
+        "quota",
+        "rate limit",
+        "rate-limit",
+        "too many",
+        "temporarily",
+        "temporary",
+        "try again",
+        "greylist",
+        "greylisted",
+        "server busy",
+        "mailbox busy",
+        "connection limit",
+        "slow down",
+        "exceeded limit",
+        "over quota",
+        "space exhausted",
+        "storage allocation",
+        "421",
+        "450",
+        "451",
+        "452",
+    )
+    if any(kw in lower_err for kw in temp_keywords) or (400 <= code < 500) or code in (421, 450, 451, 452):
+        return "temporary_failure", "temporary_failure"
+
+    # Recipient hard-bounce signals (permanent rejections)
+    hard_keywords = (
+        "user unknown",
+        "unknown user",
+        "no such user",
+        "recipient address rejected",
+        "does not exist",
+        "invalid recipient",
+        "mailbox unavailable",
+        "bad destination",
+        "undeliverable",
+        "account disabled",
+        "address rejected",
+        "550",
+        "551",
+        "552",
+        "553",
+        "554",
+    )
+    if any(kw in lower_err for kw in hard_keywords) or (500 <= code < 600) or code in (550, 551, 552, 553, 554):
+        return "bounce", "hard_bounce"
+
+    if 500 <= code < 600:
+        return "bounce", "hard_bounce"
+
+    return "temporary_failure", "temporary_failure"
 
 
 # ---- Gmail API file logger ----
@@ -1383,10 +1464,20 @@ def _send_via_smtp(
     except smtplib.SMTPRecipientsRefused as e:
         err = str(e)[:300]
         _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
-        # Recipient-level rejection — a bad lead address, not a broken inbox.
-        # Do NOT record it as an inbox send failure (that would flip the inbox
-        # health to "failing" and can trip the repeated-failure alert).
-        return SendFailure(error_type="invalid_recipient", message=f"SMTP recipient refused: {err}")
+        rcpt_code = 0
+        if getattr(e, "recipients", None) and isinstance(e.recipients, dict):
+            for _rcpt, res in e.recipients.items():
+                if isinstance(res, tuple) and len(res) >= 1 and isinstance(res[0], int):
+                    rcpt_code = res[0]
+                    break
+        err_type, bounce_type = classify_smtp_error(rcpt_code, err)
+        if bounce_type == "temporary_failure":
+            return SendFailure(
+                error_type="temporary_failure",
+                message=f"SMTP temporary recipient failure ({rcpt_code or 'temp'}): {err}",
+                bounce_type="temporary_failure",
+            )
+        return SendFailure(error_type="invalid_recipient", message=f"SMTP recipient refused: {err}", bounce_type="hard_bounce")
     except smtplib.SMTPSenderRefused as e:
         err = str(e)[:300]
         _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
@@ -1399,12 +1490,12 @@ def _send_via_smtp(
     except smtplib.SMTPDataError as e:
         err = str(e)[:300]
         _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
-        # 5xx at DATA time is a permanent rejection (content/policy); 4xx is transient.
         code = getattr(e, "smtp_code", 0) or 0
-        if 500 <= code < 600:
-            # Per-message content/policy rejection — not proof the inbox itself
-            # is broken, so don't mark the whole inbox failing.
-            return SendFailure(error_type="bounce", message=f"SMTP rejected the message ({code}): {err}")
+        err_type, bounce_type = classify_smtp_error(code, err)
+        if bounce_type == "hard_bounce":
+            return SendFailure(error_type="bounce", message=f"SMTP rejected the message ({code}): {err}", bounce_type="hard_bounce")
+        if bounce_type == "temporary_failure":
+            return SendFailure(error_type="temporary_failure", message=f"SMTP temporary delivery error ({code}): {err}", bounce_type="temporary_failure")
         _record_smtp_failure(smtp_account, f"SMTP DATA error ({code}): {err}")
         return None
     except smtplib.SMTPAuthenticationError as e:
@@ -1412,6 +1503,18 @@ def _send_via_smtp(
         _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
         _record_smtp_failure(smtp_account, f"SMTP authentication failed: {err}")
         return SendFailure(error_type="auth_failed", message=f"SMTP authentication failed: {err}")
+    except smtplib.SMTPServerDisconnected as e:
+        err = str(e)[:300]
+        _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="UNCERTAIN", error=err)
+        log.warning("SMTP server disconnected during/after message transmission: %s (outcome uncertain)", err)
+        _record_smtp_failure(smtp_account, f"SMTP server disconnected (uncertain): {err}")
+        return SendUncertain(message_id=message_id, thread_id=thread_key, reason=f"SMTPServerDisconnected: {err}")
+    except (socket.timeout, TimeoutError) as e:
+        err = str(e)[:300]
+        _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="UNCERTAIN", error=err)
+        log.warning("SMTP timeout during/after message transmission: %s (outcome uncertain)", err)
+        _record_smtp_failure(smtp_account, f"SMTP timeout (uncertain): {err}")
+        return SendUncertain(message_id=message_id, thread_id=thread_key, reason=f"TimeoutError: {err}")
     except (smtplib.SMTPException, socket.error, OSError) as e:
         _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=str(e)[:300])
         log.error("SMTP send error: %s", e)

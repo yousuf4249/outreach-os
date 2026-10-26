@@ -42,12 +42,12 @@ async def daily_analytics(
     # sent per day per campaign
     sent_stmt = (
         select(
-            cast(EmailLog.sent_at, Date).label("day"),
+            func.date(EmailLog.sent_at).label("day"),
             EmailLog.campaign_id,
             func.count().label("sent"),
         )
         .where(EmailLog.sent_at >= start, EmailLog.sent_at < end)
-        .group_by(cast(EmailLog.sent_at, Date), EmailLog.campaign_id)
+        .group_by(func.date(EmailLog.sent_at), EmailLog.campaign_id)
     )
     if campaign_id:
         sent_stmt = sent_stmt.where(EmailLog.campaign_id.in_(campaign_id))
@@ -55,14 +55,14 @@ async def daily_analytics(
     # opens per day per campaign
     opens_stmt = (
         select(
-            cast(EmailOpen.opened_at, Date).label("day"),
+            func.date(EmailOpen.opened_at).label("day"),
             EmailLog.campaign_id,
             func.count().label("total_opens"),
             func.count(func.distinct(EmailOpen.ip_address)).label("unique_opens"),
         )
         .join(EmailLog, EmailOpen.email_log_id == EmailLog.id)
         .where(EmailOpen.opened_at >= start, EmailOpen.opened_at < end)
-        .group_by(cast(EmailOpen.opened_at, Date), EmailLog.campaign_id)
+        .group_by(func.date(EmailOpen.opened_at), EmailLog.campaign_id)
     )
     if campaign_id:
         opens_stmt = opens_stmt.where(EmailLog.campaign_id.in_(campaign_id))
@@ -70,14 +70,14 @@ async def daily_analytics(
     # clicks per day per campaign
     clicks_stmt = (
         select(
-            cast(EmailClick.clicked_at, Date).label("day"),
+            func.date(EmailClick.clicked_at).label("day"),
             EmailLog.campaign_id,
             func.count().label("total_clicks"),
             func.count(func.distinct(EmailClick.ip_address)).label("unique_clicks"),
         )
         .join(EmailLog, EmailClick.email_log_id == EmailLog.id)
         .where(EmailClick.clicked_at >= start, EmailClick.clicked_at < end)
-        .group_by(cast(EmailClick.clicked_at, Date), EmailLog.campaign_id)
+        .group_by(func.date(EmailClick.clicked_at), EmailLog.campaign_id)
     )
     if campaign_id:
         clicks_stmt = clicks_stmt.where(EmailLog.campaign_id.in_(campaign_id))
@@ -85,7 +85,7 @@ async def daily_analytics(
     # replies per day per campaign (excluding OOO and auto-reply)
     replies_stmt = (
         select(
-            cast(LeadReply.replied_at, Date).label("day"),
+            func.date(LeadReply.replied_at).label("day"),
             LeadReply.campaign_id,
             func.count().label("total_replies"),
         )
@@ -102,7 +102,7 @@ async def daily_analytics(
                 CampaignLead.interest_status.notin_(["out_of_office", "auto_reply"]),
             ),
         )
-        .group_by(cast(LeadReply.replied_at, Date), LeadReply.campaign_id)
+        .group_by(func.date(LeadReply.replied_at), LeadReply.campaign_id)
     )
     if campaign_id:
         replies_stmt = replies_stmt.where(LeadReply.campaign_id.in_(campaign_id))
@@ -171,6 +171,24 @@ async def get_dashboard_summary(db: AsyncSession = Depends(get_db)):
     # Total emails sent
     sent_res = await db.execute(select(func.count(EmailLog.id)))
     emails_sent = sent_res.scalar() or 0
+
+    from app import time as time_provider
+    now_utc_calc = time_provider.utcnow()
+    today_start = datetime.combine(now_utc_calc.date(), datetime.min.time())
+    tomorrow_start = today_start + timedelta(days=1)
+
+    sent_today_res = await db.execute(
+        select(func.count(EmailLog.id)).where(EmailLog.sent_at >= today_start)
+    )
+    sent_today = sent_today_res.scalar() or 0
+
+    sched_today_res = await db.execute(
+        select(func.count(QueueSlot.id)).where(
+            QueueSlot.scheduled_date >= today_start,
+            QueueSlot.scheduled_date < tomorrow_start,
+        )
+    )
+    scheduled_today = sched_today_res.scalar() or 0
 
     # Detected open signals (estimated)
     opens_res = await db.execute(select(func.count(EmailLog.id)).where(EmailLog.opened == True))  # noqa: E712
@@ -323,12 +341,92 @@ async def get_dashboard_summary(db: AsyncSession = Depends(get_db)):
             "reply_rate": c_reply_rate,
         })
 
+    # Scheduler Health & Dispatch Status
+    from app import scheduler as scheduler_mod
+    from app import time as time_provider
+    from app.jobs import _in_sending_window
+    now_utc = time_provider.utcnow()
+
+    sched_instance = scheduler_mod.get_scheduler()
+    sched_running = sched_instance.running if sched_instance else False
+
+    # Check next queued slot
+    next_slot_res = await db.execute(
+        select(QueueSlot, Lead.email, Campaign.name, Campaign.timezone, Inbox.email, Inbox.display_name, QueueSlot.sequence_index)
+        .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
+        .join(Lead, CampaignLead.lead_id == Lead.id)
+        .join(Campaign, CampaignLead.campaign_id == Campaign.id)
+        .outerjoin(Inbox, QueueSlot.inbox_id == Inbox.id)
+        .order_by(QueueSlot.scheduled_date.asc())
+        .limit(1)
+    )
+    next_slot_row = next_slot_res.first()
+
+    # Unique leads scheduled in queue
+    uniq_leads_res = await db.execute(
+        select(func.count(func.distinct(CampaignLead.lead_id)))
+        .join(QueueSlot, QueueSlot.campaign_lead_id == CampaignLead.id)
+    )
+    unique_scheduled_leads = uniq_leads_res.scalar() or 0
+
+    # Total leads enrolled across campaigns
+    total_enrolled_leads_res = await db.execute(select(func.count(CampaignLead.id)))
+    total_enrolled_leads = total_enrolled_leads_res.scalar() or 0
+
+    # Check if primary active campaign is in sending window right now
+    primary_camp = campaigns[0] if campaigns else None
+    window_open_now = _in_sending_window(now_utc, primary_camp) if primary_camp else False
+
+    # Historical senders
+    hist_senders_res = await db.execute(
+        select(func.distinct(Inbox.email), Inbox.outbound_provider, Inbox.display_name)
+        .join(EmailLog, EmailLog.inbox_id == Inbox.id)
+    )
+    historical_senders = [
+        {"email": r[0], "provider": r[1] or "smtp", "display_name": r[2]}
+        for r in hist_senders_res.all()
+    ]
+
+    # Active sender inboxes
+    active_inboxes_res = await db.execute(select(Inbox).where(Inbox.paused == False))
+    active_inboxes = [
+        {"id": i.id, "email": i.email, "provider": getattr(i, "outbound_provider", None) or i.provider, "display_name": i.display_name}
+        for i in active_inboxes_res.scalars().all()
+    ]
+
+    scheduler_health = {
+        "status": "operational" if sched_running else "degraded",
+        "running": sched_running,
+        "scan_interval_seconds": 60,
+        "window_open": window_open_now,
+        "timezone": getattr(primary_camp, "timezone", "America/Chicago") if primary_camp else "America/Chicago",
+        "current_time_utc": now_utc.isoformat() + "Z",
+    }
+
+    dispatch_status = {
+        "total_scheduled_slots": emails_scheduled,
+        "unique_scheduled_leads": unique_scheduled_leads,
+        "total_enrolled_leads": total_enrolled_leads,
+        "next_slot": {
+            "scheduled_at": (next_slot_row[0].scheduled_date.isoformat() + "Z") if next_slot_row else None,
+            "recipient": next_slot_row[1] if next_slot_row else None,
+            "campaign": next_slot_row[2] if next_slot_row else None,
+            "sequence_step": (next_slot_row[6] + 1) if next_slot_row else None,
+            "sender_email": next_slot_row[4] if next_slot_row else None,
+        } if next_slot_row else None,
+        "historical_senders": historical_senders,
+        "active_senders": active_inboxes,
+        "cannot_resend_completed": True,
+    }
+
     return {
         "total_prospects": total_prospects,
         "total_inboxes": total_inboxes,
         "active_campaigns": active_campaigns,
         "emails_scheduled": emails_scheduled,
         "emails_sent": emails_sent,
+        "scheduled_today": scheduled_today,
+        "sent_today": sent_today,
         "detected_opens": detected_opens,
         "link_clicks": link_clicks,
         "replies_received": replies_received,
@@ -344,5 +442,7 @@ async def get_dashboard_summary(db: AsyncSession = Depends(get_db)):
         "open_rate": open_signal_rate,
         "recent_activity": recent_activity,
         "campaign_performance": campaign_performance,
+        "scheduler_health": scheduler_health,
+        "dispatch_status": dispatch_status,
     }
 

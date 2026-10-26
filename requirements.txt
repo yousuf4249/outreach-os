@@ -15,6 +15,7 @@ google-auth-oauthlib>=0.8
 asyncpg>=0.27  # PostgreSQL async driver
 psycopg2-binary>=2.9  # sync PostgreSQL driver required by APScheduler SQLAlchemyJobStore
 aiosqlite>=0.19  # required for test fallback to SQLite
+greenlet>=3.0.0  # async SQLAlchemy dependency
 # Microsoft Office 365 / Outlook OAuth2 via MSAL
 msal>=1.24
 any-llm-sdk[all]>=1.9  # unified LLM provider interface for AI classification
@@ -26,3 +27,7 @@ slowapi>=0.1.9
 dnspython>=2.8
 mcp>=1.2,<2  # v1 API (FastMCP); v2 renamed it to MCPServer
 openpyxl>=3.1
+# Email validation, prospect research scraping and data engines
+email-validator>=2.0
+duckdb>=0.9.0
+beautifulsoup4>=4.12.0

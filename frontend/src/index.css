@@ -69,8 +69,8 @@ select:focus-visible, textarea:focus-visible {
 
 /* make table cells easier to scan */
 table { @apply w-full border-collapse; }
-table th, table td { @apply px-2 py-1 border border-gray-200 text-left; }
-table tr:nth-child(even){ @apply bg-gray-50; }
+table th, table td { @apply px-2 py-1 border border-gray-200 dark:border-slate-800 text-left; }
+table tr:nth-child(even){ @apply bg-gray-50/50 dark:bg-slate-900/40; }
 
 /* prevent page-level horizontal scroll; tables scroll inside their container */
 html, body { overflow-x: hidden; }
@@ -186,4 +186,38 @@ html, body, #root {
 }
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+
+/* Accessible Table Scrollbars */
+.table-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(71, 85, 105, 0.45) rgba(0, 0, 0, 0.05);
+}
+.table-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.table-scrollbar::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 6px;
+}
+.table-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.35);
+  border-radius: 6px;
+}
+.table-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(71, 85, 105, 0.65);
+}
+.dark .table-scrollbar {
+  scrollbar-color: rgba(148, 163, 184, 0.5) rgba(255, 255, 255, 0.05);
+}
+.dark .table-scrollbar::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.04);
+}
+.dark .table-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.45);
+}
+.dark .table-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.75);
 }

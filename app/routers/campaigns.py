@@ -54,6 +54,13 @@ from app.schemas import (
     SequenceVariantUpdate,
     SequenceVariantResponse,
     CustomEmailWrite,
+    BulkCampaignDeleteRequest,
+    BulkCampaignDeleteResponse,
+    BulkCampaignArchiveRequest,
+    BulkCampaignArchiveResponse,
+    CampaignLeadBulkRemoveRequest,
+    CampaignLeadBulkActionRequest,
+    CampaignLeadBulkRetryRequest,
 )
 from app.lead_inbox_resolution import from_inbox_email_by_lead_campaign
 from app.routers.leads import _fetch_lead_interactions_batch
@@ -105,6 +112,7 @@ def _campaign_to_response(
         timezone=getattr(campaign, 'timezone', None),
         match_lead_provider=bool(getattr(campaign, 'match_lead_provider', False)),
         custom_sequence_mode=getattr(campaign, 'custom_sequence_mode', 'wait_for_all'),
+        archived=bool(getattr(campaign, 'archived', False)),
         created_at=campaign.created_at,
         stats=stats,
     )
@@ -441,33 +449,46 @@ async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
     return _campaign_to_response(campaign, inbox_map.get(campaign_id, []), stats)
 
 
-@router.delete("/{campaign_id}")
-async def delete_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
-    campaign = result.scalar_one_or_none()
-    if not campaign:
-        raise HTTPException(404, "Campaign not found")
-    # gather lead IDs so we can decide whether any should also be removed
-    cl_res = await db.execute(
-        select(CampaignLead.lead_id).where(CampaignLead.campaign_id == campaign_id)
+async def _delete_single_campaign_internal(
+    campaign: Campaign,
+    db: AsyncSession,
+    purge_leads: bool = False,
+):
+    """Internal helper to cancel campaign queue slots, unsubscribe tokens,
+    campaign assignments, and remove the campaign. Central prospects in
+    the Lead table are preserved unless explicitly purged."""
+    campaign_id = campaign.id
+
+    # 1. Safely cancel all scheduled queue slots belonging to this campaign
+    cl_ids_res = await db.execute(
+        select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id)
     )
-    lead_ids = [r[0] for r in cl_res.all()]
+    cl_ids = [r[0] for r in cl_ids_res.all()]
+    if cl_ids:
+        await db.execute(
+            delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(cl_ids))
+        )
 
-    # delete any unsubscribe tokens belonging to this campaign before we
-    # remove the campaign itself; the FK constraint otherwise trips during
-    # the flush when SQLAlchemy issues the DELETE on campaign.
-    await db.execute(delete(LeadUnsubscribeToken).where(LeadUnsubscribeToken.campaign_id == campaign_id))
+    # 2. Gather lead IDs only if purge_leads is explicitly requested
+    lead_ids = []
+    if purge_leads:
+        cl_lead_res = await db.execute(
+            select(CampaignLead.lead_id).where(CampaignLead.campaign_id == campaign_id)
+        )
+        lead_ids = [r[0] for r in cl_lead_res.all()]
 
-    # Cascade handles sequences, campaign_leads (and their queue_slots),
-    # campaign_inboxes, etc.  after flushing we can inspect which of the
-    # previously-associated leads are now orphans and delete them as well.
+    # 3. Delete unsubscribe tokens
+    await db.execute(
+        delete(LeadUnsubscribeToken).where(LeadUnsubscribeToken.campaign_id == campaign_id)
+    )
+
+    # 4. Delete Campaign itself (SQLAlchemy cascades delete CampaignLead, CampaignInbox,
+    # Sequence, SequenceVariant, EmailLog, LeadReply)
     await db.delete(campaign)
     await db.flush()
 
-    orphan_ids: list[int] = []
-    if lead_ids:
-        # any remaining CampaignLead rows for these leads? if not, the lead
-        # belonged exclusively to the deleted campaign and can be removed.
+    # 5. Only purge orphan leads if explicitly requested (default is FALSE to protect central Prospects database)
+    if purge_leads and lead_ids:
         res2 = await db.execute(
             select(CampaignLead.lead_id)
             .where(CampaignLead.lead_id.in_(lead_ids))
@@ -475,16 +496,141 @@ async def delete_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
         )
         remaining = {r[0] for r in res2.all()}
         orphan_ids = [lid for lid in lead_ids if lid not in remaining]
+        if orphan_ids:
+            await db.execute(delete(EmailLog).where(EmailLog.lead_id.in_(orphan_ids)))
+            await db.execute(delete(LeadReply).where(LeadReply.lead_id.in_(orphan_ids)))
+            await db.execute(delete(Lead).where(Lead.id.in_(orphan_ids)))
+            log.info("delete_campaign: also removed %s orphan leads", len(orphan_ids))
 
-    if orphan_ids:
-        # mirror the logic in delete_lead to clean up associated logs/replies
-        await db.execute(delete(EmailLog).where(EmailLog.lead_id.in_(orphan_ids)))
-        await db.execute(delete(LeadReply).where(LeadReply.lead_id.in_(orphan_ids)))
-        await db.execute(delete(Lead).where(Lead.id.in_(orphan_ids)))
-        log.info("delete_campaign: also removed %s orphan leads", len(orphan_ids))
 
+@router.delete("/{campaign_id}")
+async def delete_campaign(
+    campaign_id: int,
+    force: bool = False,
+    purge_leads: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    campaign = result.scalar_one_or_none()
+    if not campaign:
+        raise HTTPException(404, "Campaign not found")
+
+    # Prevent accidental deletion of active campaigns. Require them to be paused first.
+    if not campaign.paused and not force:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete active campaign '{campaign.name}'. Please pause the campaign before deleting it.",
+        )
+
+    await _delete_single_campaign_internal(campaign, db, purge_leads=purge_leads)
     log.info("delete_campaign: deleted campaign %s (%s)", campaign_id, campaign.name)
     return {"ok": True}
+
+
+@router.post("/bulk-delete", response_model=BulkCampaignDeleteResponse)
+async def bulk_delete_campaigns(
+    data: BulkCampaignDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk delete campaigns. Active campaigns cannot be deleted and must be paused first.
+    Scheduled queue slots are safely removed, while prospects in the central database remain safe."""
+    if not data.campaign_ids:
+        return BulkCampaignDeleteResponse(
+            ok=True,
+            deleted_count=0,
+            deleted_campaigns=[],
+            failed_count=0,
+            failed_campaigns=[],
+            message="No campaigns specified for deletion.",
+        )
+
+    result = await db.execute(select(Campaign).where(Campaign.id.in_(data.campaign_ids)))
+    campaigns = {c.id: c for c in result.scalars().all()}
+
+    deleted_campaigns = []
+    failed_campaigns = []
+
+    for cid in data.campaign_ids:
+        camp = campaigns.get(cid)
+        if not camp:
+            failed_campaigns.append({"id": cid, "name": f"ID #{cid}", "reason": "Campaign not found"})
+            continue
+        if not camp.paused:
+            failed_campaigns.append({
+                "id": cid,
+                "name": camp.name,
+                "reason": "Campaign is currently active. Please pause it first.",
+            })
+            continue
+
+        try:
+            name = camp.name
+            await _delete_single_campaign_internal(camp, db, purge_leads=False)
+            deleted_campaigns.append({"id": cid, "name": name})
+        except Exception as e:
+            log.error("Failed to delete campaign %s: %s", cid, e)
+            failed_campaigns.append({"id": cid, "name": camp.name, "reason": str(e)})
+
+    del_count = len(deleted_campaigns)
+    fail_count = len(failed_campaigns)
+
+    if del_count > 0 and fail_count == 0:
+        msg = f"Successfully deleted {del_count} campaign{'s' if del_count != 1 else ''}."
+    elif del_count > 0 and fail_count > 0:
+        msg = f"Deleted {del_count} campaign{'s' if del_count != 1 else ''}. {fail_count} active campaign{'s were' if fail_count != 1 else ' was'} skipped because active campaigns must be paused first."
+    elif del_count == 0 and fail_count > 0:
+        msg = f"No campaigns deleted. {fail_count} active campaign{'s were' if fail_count != 1 else ' was'} skipped because active campaigns must be paused first."
+    else:
+        msg = "No campaigns deleted."
+
+    return BulkCampaignDeleteResponse(
+        ok=fail_count == 0,
+        deleted_count=del_count,
+        deleted_campaigns=deleted_campaigns,
+        failed_count=fail_count,
+        failed_campaigns=failed_campaigns,
+        message=msg,
+    )
+
+
+@router.post("/bulk-archive", response_model=BulkCampaignArchiveResponse)
+async def bulk_archive_campaigns(
+    data: BulkCampaignArchiveRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk archive or unarchive campaigns for historical reporting."""
+    if not data.campaign_ids:
+        return BulkCampaignArchiveResponse(ok=True, updated_count=0, message="No campaigns specified.")
+
+    result = await db.execute(select(Campaign).where(Campaign.id.in_(data.campaign_ids)))
+    campaigns = result.scalars().all()
+    count = 0
+    for c in campaigns:
+        c.archived = data.archive
+        count += 1
+    await db.flush()
+
+    action = "archived" if data.archive else "unarchived"
+    return BulkCampaignArchiveResponse(
+        ok=True,
+        updated_count=count,
+        message=f"Successfully {action} {count} campaign{'s' if count != 1 else ''}.",
+    )
+
+
+@router.post("/{campaign_id}/archive")
+async def toggle_campaign_archive(
+    campaign_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle single campaign archive status."""
+    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    camp = result.scalar_one_or_none()
+    if not camp:
+        raise HTTPException(404, "Campaign not found")
+    camp.archived = not getattr(camp, "archived", False)
+    await db.flush()
+    return {"ok": True, "archived": camp.archived}
 
 
 @router.patch("/{campaign_id}", response_model=CampaignResponse)
@@ -499,6 +645,8 @@ async def update_campaign(
     if not campaign:
         raise HTTPException(404, "Campaign not found")
     needs_global_recalc = False
+    if data.archived is not None:
+        campaign.archived = data.archived
     if data.name is not None:
         campaign.name = data.name
     if data.inbox_ids is not None:
@@ -1133,6 +1281,8 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
             "clicked": lead.id in clicked_set,
             "replied": lead.id in replied_set,
             "sending_paused": cl.sending_paused,
+            "failure_reason": cl.failure_reason or ("Address bounced / delivery rejected" if (cl.enrollment_status == "bounced" or lead.status == "bounced") else None),
+            "bounce_type": cl.bounce_type or ("hard_bounce" if (cl.enrollment_status == "bounced" or lead.status == "bounced") else None),
             "email_verification_status": lead.email_verification_status,
             "provider": lead.provider,
             "from_inbox_email": inbox_by_lead.get((lead.id, campaign_id)),
@@ -1170,6 +1320,8 @@ async def patch_campaign_lead(
                 f"status must be one of: {', '.join(sorted(ENROLLMENT_STATUSES))}",
             )
         cl.enrollment_status = st
+        if st in ("stopped", "completed", "bounced", "unsubscribed", "wrong_person"):
+            await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id))
 
     if payload.interest is not None:
         raw = payload.interest
@@ -1186,6 +1338,8 @@ async def patch_campaign_lead(
 
     if payload.sending_paused is not None:
         cl.sending_paused = payload.sending_paused
+        if payload.sending_paused:
+            await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id))
 
     await db.flush()
     # Full global recalculation: schedule must mirror what the send job will deliver.
@@ -1964,6 +2118,12 @@ async def list_sent_emails(campaign_id: int, db: AsyncSession = Depends(get_db))
             "variant_id": el.variant_id,
             "variant_label": (el.variant.label if el.variant else None),
             "inbox_email": inbox.email if inbox else None,
+            "sender_email": inbox.email if inbox else None,
+            "sending_provider": (
+                "Titan (SMTP)" if (inbox and (getattr(inbox, "outbound_provider", None) == "titan" or "weblinxsolution.com" in (inbox.email or "")))
+                else ("Mailgun (SMTP)" if (inbox and (getattr(inbox, "outbound_provider", None) == "mailgun" or (inbox.email or "").endswith(".co") or inbox.id == 3))
+                else (inbox.provider if inbox else None))
+            ),
         }
         for el, lead, cl, inbox in rows
     ]
@@ -1976,7 +2136,8 @@ async def remove_lead_from_campaign(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    """Remove a lead from a campaign. Deletes enrollment and pending queue slots."""
+    """Remove a lead from a campaign. Deletes enrollment, custom overrides, and pending queue slots.
+    Never deletes the central Lead record or email delivery logs."""
     result = await db.execute(
         select(CampaignLead).where(
             CampaignLead.campaign_id == campaign_id,
@@ -1986,8 +2147,9 @@ async def remove_lead_from_campaign(
     cl = result.scalar_one_or_none()
     if not cl:
         raise HTTPException(404, "Lead not enrolled in this campaign")
-    # Delete queue slots for this enrollment (cascade would handle it, but be explicit)
+    # Delete queue slots and custom overrides for this enrollment
     await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id))
+    await db.execute(delete(CustomEmailOverride).where(CustomEmailOverride.campaign_lead_id == cl.id))
     await db.delete(cl)
     await db.flush()
     await db.commit()
@@ -1995,7 +2157,218 @@ async def remove_lead_from_campaign(
 
     enqueue_global_recalculate(background_tasks)
     log.info("remove_lead: campaign=%s lead=%s", campaign_id, lead_id)
-    return {"ok": True}
+    return {"ok": True, "lead_id": lead_id}
+
+
+@router.post("/{campaign_id}/leads/bulk-remove")
+async def bulk_remove_leads_from_campaign(
+    campaign_id: int,
+    payload: CampaignLeadBulkRemoveRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove multiple leads from a campaign in bulk.
+
+    Deletes CampaignLead enrollments, custom email overrides, and pending queue slots.
+    Never deletes or alters the central Lead record or email sending/delivery history.
+    """
+    if not payload.lead_ids:
+        return {"ok": True, "removed": 0, "lead_ids": []}
+
+    unique_ids = list(dict.fromkeys(payload.lead_ids))
+    result = await db.execute(
+        select(CampaignLead).where(
+            CampaignLead.campaign_id == campaign_id,
+            CampaignLead.lead_id.in_(unique_ids),
+        )
+    )
+    cls = list(result.scalars().all())
+    if not cls:
+        return {"ok": True, "removed": 0, "lead_ids": []}
+
+    cl_ids = [c.id for c in cls]
+    removed_lead_ids = [c.lead_id for c in cls]
+
+    # 1. Delete pending queue slots for these enrollments
+    await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(cl_ids)))
+    # 2. Delete custom email overrides
+    await db.execute(delete(CustomEmailOverride).where(CustomEmailOverride.campaign_lead_id.in_(cl_ids)))
+    # 3. Delete CampaignLead rows
+    await db.execute(delete(CampaignLead).where(CampaignLead.id.in_(cl_ids)))
+
+    await db.flush()
+    await db.commit()
+
+    from app.routers.schedule import enqueue_global_recalculate
+    enqueue_global_recalculate(background_tasks)
+    log.info("bulk_remove_leads: campaign=%s removed=%s lead_ids=%s", campaign_id, len(removed_lead_ids), removed_lead_ids)
+    return {"ok": True, "removed": len(removed_lead_ids), "lead_ids": removed_lead_ids}
+
+
+@router.post("/{campaign_id}/leads/bulk-action")
+async def bulk_action_campaign_leads(
+    campaign_id: int,
+    payload: CampaignLeadBulkActionRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Apply bulk state actions ('stop', 'resume', 'pause') to selected campaign leads."""
+    if not payload.lead_ids:
+        return {"ok": True, "updated": 0, "action": payload.action}
+
+    unique_ids = list(dict.fromkeys(payload.lead_ids))
+    result = await db.execute(
+        select(CampaignLead, Lead)
+        .join(Lead, CampaignLead.lead_id == Lead.id)
+        .where(
+            CampaignLead.campaign_id == campaign_id,
+            CampaignLead.lead_id.in_(unique_ids),
+        )
+    )
+    rows = list(result.all())
+    if not rows:
+        return {"ok": True, "updated": 0, "action": payload.action}
+
+    action = payload.action.strip().lower()
+    cl_ids = [cl.id for cl, _lead in rows]
+
+    if action == "stop":
+        # Stop sequence / unenroll: set status to 'stopped' and delete pending queue slots
+        for cl, _lead in rows:
+            cl.enrollment_status = "stopped"
+            cl.sending_paused = True
+        await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(cl_ids)))
+    elif action == "pause":
+        for cl, _lead in rows:
+            cl.sending_paused = True
+        await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(cl_ids)))
+    elif action in ("resume", "unpause"):
+        schedulable_cl_ids = []
+        for cl, lead in rows:
+            cl.sending_paused = False
+            if cl.enrollment_status == "stopped":
+                cl.enrollment_status = "active"
+            if campaign_lead_may_receive_sends(cl, lead):
+                schedulable_cl_ids.append(cl.id)
+        if schedulable_cl_ids:
+            await reserve_slots_for_new_leads_bulk(db, schedulable_cl_ids, campaign_id)
+    else:
+        raise HTTPException(400, f"Unsupported action '{action}'. Must be 'stop', 'pause', or 'resume'.")
+
+    await db.flush()
+    await db.commit()
+    from app.routers.schedule import enqueue_global_recalculate
+    enqueue_global_recalculate(background_tasks)
+    return {"ok": True, "updated": len(rows), "action": action}
+
+
+@router.post("/{campaign_id}/leads/{lead_id}/retry")
+async def retry_bounced_campaign_lead(
+    campaign_id: int,
+    lead_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Safely retry/recover a campaign lead that encountered a temporary delivery failure.
+
+    Permanently hard-bounced or globally suppressed leads are strictly rejected.
+    """
+    from app.routers.suppression import is_email_or_domain_suppressed
+
+    result = await db.execute(
+        select(CampaignLead, Lead)
+        .join(Lead, CampaignLead.lead_id == Lead.id)
+        .where(
+            CampaignLead.campaign_id == campaign_id,
+            CampaignLead.lead_id == lead_id,
+        )
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(404, "Campaign-lead enrollment not found")
+    cl, lead = row
+
+    # Global suppression guard
+    if await is_email_or_domain_suppressed(db, lead.email):
+        raise HTTPException(400, "Cannot retry send: email or domain is on the global suppression list.")
+
+    # Hard bounce guard
+    if (lead.status or "").lower() in ("invalid", "unsubscribed") or cl.bounce_type == "hard_bounce":
+        raise HTTPException(400, "Cannot retry confirmed permanent recipient bounce. Address permanently rejected delivery.")
+
+    # Reset enrollment status
+    cl.enrollment_status = "active"
+    cl.sending_paused = False
+    cl.failure_reason = None
+    cl.bounce_type = None
+
+    if campaign_lead_may_receive_sends(cl, lead):
+        await reserve_slots_for_new_leads_bulk(db, [cl.id], campaign_id)
+
+    await db.flush()
+    await db.commit()
+    from app.routers.schedule import enqueue_global_recalculate
+    enqueue_global_recalculate(background_tasks)
+    return {"ok": True, "message": "Lead recovered and scheduled for sending"}
+
+
+@router.post("/{campaign_id}/leads/bulk-retry")
+async def bulk_retry_campaign_leads(
+    campaign_id: int,
+    payload: CampaignLeadBulkRetryRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk recover eligible temporary delivery failures.
+
+    Skips permanently bounced and suppressed addresses safely, reporting partial successes.
+    """
+    from app.routers.suppression import is_email_or_domain_suppressed
+
+    if not payload.lead_ids:
+        return {"ok": True, "recovered": 0, "skipped_hard_bounces": 0}
+
+    unique_ids = list(dict.fromkeys(payload.lead_ids))
+    result = await db.execute(
+        select(CampaignLead, Lead)
+        .join(Lead, CampaignLead.lead_id == Lead.id)
+        .where(
+            CampaignLead.campaign_id == campaign_id,
+            CampaignLead.lead_id.in_(unique_ids),
+        )
+    )
+    rows = list(result.all())
+    recovered_cl_ids = []
+    skipped_hard = 0
+
+    for cl, lead in rows:
+        if await is_email_or_domain_suppressed(db, lead.email):
+            skipped_hard += 1
+            continue
+        if (lead.status or "").lower() in ("invalid", "unsubscribed") or cl.bounce_type == "hard_bounce":
+            skipped_hard += 1
+            continue
+
+        cl.enrollment_status = "active"
+        cl.sending_paused = False
+        cl.failure_reason = None
+        cl.bounce_type = None
+        if campaign_lead_may_receive_sends(cl, lead):
+            recovered_cl_ids.append(cl.id)
+
+    if recovered_cl_ids:
+        await reserve_slots_for_new_leads_bulk(db, recovered_cl_ids, campaign_id)
+
+    await db.flush()
+    await db.commit()
+    from app.routers.schedule import enqueue_global_recalculate
+    enqueue_global_recalculate(background_tasks)
+    return {
+        "ok": True,
+        "recovered": len(recovered_cl_ids),
+        "skipped_hard_bounces": skipped_hard,
+        "message": f"Recovered {len(recovered_cl_ids)} lead(s); {skipped_hard} permanent hard bounce(s) kept suppressed.",
+    }
 
 
 @router.post("/{campaign_id}/leads")
@@ -2138,6 +2511,17 @@ async def bulk_add_leads_to_campaign(
                     results.append({"email": email, "status": "already_enrolled"})
                     already_enrolled += 1
                     continue
+
+            # Global suppression & hard-bounce guard: removal and re-enrollment must NEVER bypass suppression!
+            from app.routers.suppression import is_email_or_domain_suppressed
+            if (lead.status or "").lower() in ("bounced", "unsubscribed", "invalid"):
+                results.append({"email": email, "status": "blocked", "detail": f"Contact is {lead.status} (globally suppressed)"})
+                errors += 1
+                continue
+            if await is_email_or_domain_suppressed(db, email):
+                results.append({"email": email, "status": "blocked", "detail": "Email or domain is on suppression list"})
+                errors += 1
+                continue
 
             # Enroll — scheduling happens after all leads are enrolled (see below)
             cl = CampaignLead(campaign_id=campaign_id, lead_id=lead.id)
@@ -2350,11 +2734,14 @@ async def _run_background_verification(lead_ids: list[int], *, reverify: bool = 
                 _cp = CustomHttpProvider(custom_url, custom_field, valid_vals, invalid_vals, custom_method)
                 async def _do_verify(email: str) -> "VerificationResult":  # type: ignore[name-defined]  # noqa: E731
                     return await _cp.verify(email, "")
+            elif provider_name == "self_hosted" or not (await get_setting(db, EMAIL_VERIFICATION_API_KEY)):
+                from app.verification_engine import verify_single_email
+                from app.email_verification import VerificationResult
+                async def _do_verify(email: str) -> "VerificationResult":
+                    res = await verify_single_email(email, check_smtp=False)
+                    return VerificationResult(email, res.status, raw=res.to_dict(), message=res.reason)
             else:
                 api_key = await get_setting(db, EMAIL_VERIFICATION_API_KEY) or ""
-                if not api_key:
-                    log.warning("Email verification enabled but no API key configured")
-                    return
                 async def _do_verify(email: str) -> "VerificationResult":  # type: ignore[name-defined]  # noqa: E731
                     return await verify_single(email, api_key, provider_name)
 
@@ -2399,9 +2786,12 @@ async def _run_background_verification(lead_ids: list[int], *, reverify: bool = 
                         fresh_lead.email_verification_status = new_verif
                         fresh_lead.email_verification_result = vr.raw
 
-                        if new_verif in BLOCK_SEND_STATUSES:
+                        if new_verif in (VALID, "domain_validated"):
+                            pending_valid.append(lead.id)
                             new_status = fresh_lead.status
-                            # Remove any existing queue slots
+                        else:
+                            new_status = fresh_lead.status
+                            # Remove queue slots for invalid or review-needed unapproved leads
                             cl_result = await db.execute(
                                 select(CampaignLead.id).where(CampaignLead.lead_id == lead.id)
                             )
@@ -2410,9 +2800,6 @@ async def _run_background_verification(lead_ids: list[int], *, reverify: bool = 
                                 await db.execute(
                                     delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(cl_ids))
                                 )
-                        else:
-                            pending_valid.append(lead.id)
-                            new_status = fresh_lead.status
 
                         await db.commit()
 
@@ -2530,6 +2917,39 @@ async def trigger_verification_for_campaign(
     return {"ok": True, "queued": len(lead_ids), "needs_reverify": False, "total_verified": total_verified}
 
 
+
+@router.post("/{campaign_id}/leads/approve-all-review")
+async def approve_all_review_campaign_leads(
+    campaign_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Approve all review-needed leads in this campaign so they can receive sends."""
+    res = await db.execute(
+        select(Lead)
+        .join(CampaignLead, CampaignLead.lead_id == Lead.id)
+        .where(
+            CampaignLead.campaign_id == campaign_id,
+            Lead.email_verification_status != "invalid",
+        )
+    )
+    leads = res.scalars().all()
+    count = 0
+    from datetime import datetime
+    for lead in leads:
+        res_data = dict(lead.email_verification_result or {})
+        if not res_data.get("approved"):
+            res_data["approved"] = True
+            res_data["approval_audit"] = {
+                "campaign_id": campaign_id,
+                "approved_at": datetime.utcnow().isoformat(),
+                "note": "Campaign batch review approval",
+            }
+            lead.email_verification_result = res_data
+            count += 1
+    await db.commit()
+    return {"ok": True, "approved_count": count}
+
+
 @router.get("/{campaign_id}/leads/verification-status")
 async def get_verification_status(
     campaign_id: int,
@@ -2645,6 +3065,7 @@ async def export_campaign_leads(
     custom_keys = sorted(all_keys)
 
     output = io.StringIO()
+    output.write("\ufeff")
     writer = csv.writer(output)
     header = list(_CAMPAIGN_LEADS_CSV_BUILTIN) + custom_keys
     writer.writerow(header)
@@ -2866,6 +3287,15 @@ async def import_campaign_leads(
                     results_list.append({"row": row_num, "email": email, "status": "already_enrolled"})
                     already_enrolled += 1
                     continue
+
+            # Global suppression & hard-bounce guard
+            from app.routers.suppression import is_email_or_domain_suppressed
+            if (lead.status or "").lower() in ("bounced", "unsubscribed", "invalid"):
+                results_list.append({"row": row_num, "email": email, "status": "blocked", "detail": f"Contact is {lead.status} (suppressed)"})
+                continue
+            if await is_email_or_domain_suppressed(db, email):
+                results_list.append({"row": row_num, "email": email, "status": "blocked", "detail": "Email or domain is on suppression list"})
+                continue
 
             cl = CampaignLead(campaign_id=campaign_id, lead_id=lead.id)
             db.add(cl)

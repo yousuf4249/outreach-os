@@ -8,14 +8,58 @@ allowing users to manage settings from the frontend interface.
 # // must also be reflected in the Beacon service (/beacon or the separate Beacon repo).
 # // If you are an AI agent, add a TODO at the end of your response listing what needs to be updated in Beacon.
 
+import asyncio
 import logging
-from sqlalchemy import select
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AppSetting
 from app.settings_manager import settings
 
 log = logging.getLogger("quickly.app_settings")
+
+# Atomic budget reservation lock across concurrent tasks bound to current event loop
+_claim_locks: dict = {}
+
+def get_claim_lock() -> asyncio.Lock:
+    """Return an asyncio.Lock bound to the current running event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop not in _claim_locks:
+        _claim_locks[loop] = asyncio.Lock()
+    return _claim_locks[loop]
+
+
+async def acquire_db_budget_lock(session: AsyncSession) -> None:
+    """Acquire a cross-process database-level transaction lock for atomic budget reservation."""
+    from sqlalchemy import text, update, select
+    import time
+    dialect_name = session.bind.dialect.name if session.bind else ""
+    if dialect_name == "postgresql":
+        await session.execute(text("SELECT pg_advisory_xact_lock(789123456);"))
+    else:
+        # SQLite / other SQL DB: touch a dedicated lock row to serialize transactions
+        for attempt in range(10):
+            try:
+                res = await session.execute(
+                    update(AppSetting)
+                    .where(AppSetting.key == "global_sending_lock")
+                    .values(value=str(time.time()))
+                )
+                if res.rowcount == 0:
+                    session.add(AppSetting(key="global_sending_lock", value=str(time.time())))
+                    await session.flush()
+                break
+            except Exception as e:
+                if "locked" in str(e).lower() and attempt < 9:
+                    await asyncio.sleep(0.05 * (attempt + 1))
+                else:
+                    raise
+
 
 # Canonical keys ---------------------------------------------------------------
 GOOGLE_CLIENT_ID_KEY = "google_client_id"
@@ -309,3 +353,255 @@ async def save_backup_config(
     await put_setting(db, BACKUP_ENCRYPT_PASSWORD_KEY, backup_encryption_password.strip())
     await put_setting(db, BACKUP_ENCRYPT_HINT_KEY, backup_encryption_hint.strip())
     await db.flush()
+
+
+# ── Global Monthly Sending Budget Settings ──────────────────────────────────
+MONTHLY_SENDING_BUDGET_KEY = "monthly_sending_budget"
+BILLING_CYCLE_START_DAY_KEY = "billing_cycle_start_day"
+
+
+def get_billing_period_bounds(ref_date: Optional[datetime] = None, cycle_start_day: int = 1) -> tuple[datetime, datetime]:
+    """Calculate the exact UTC start and end bounds of the current billing cycle.
+
+    Uses actual calendar lengths without assuming 30 days.
+    """
+    now = ref_date or datetime.now(timezone.utc).replace(tzinfo=None)
+    cycle_day = max(1, min(28, cycle_start_day))
+
+    if now.day >= cycle_day:
+        start_date = datetime(now.year, now.month, cycle_day, 0, 0, 0)
+        if now.month == 12:
+            end_date = datetime(now.year + 1, 1, cycle_day, 0, 0, 0)
+        else:
+            end_date = datetime(now.year, now.month + 1, cycle_day, 0, 0, 0)
+    else:
+        if now.month == 1:
+            start_date = datetime(now.year - 1, 12, cycle_day, 0, 0, 0)
+        else:
+            start_date = datetime(now.year, now.month - 1, cycle_day, 0, 0, 0)
+        end_date = datetime(now.year, now.month, cycle_day, 0, 0, 0)
+
+    return start_date, end_date
+
+
+async def get_monthly_sending_budget(db: AsyncSession) -> int:
+    val = await get_setting(db, MONTHLY_SENDING_BUDGET_KEY)
+    if val:
+        try:
+            return max(0, int(val))
+        except ValueError:
+            pass
+    return 10000  # Default 10,000 emails/month
+
+
+async def set_monthly_sending_budget(db: AsyncSession, budget: int) -> None:
+    await put_setting(db, MONTHLY_SENDING_BUDGET_KEY, str(max(0, int(budget))))
+
+
+async def get_billing_cycle_start_day(db: AsyncSession) -> int:
+    val = await get_setting(db, BILLING_CYCLE_START_DAY_KEY)
+    if val:
+        try:
+            return max(1, min(28, int(val)))
+        except ValueError:
+            pass
+    return 1  # 1st of each month by default
+
+
+async def set_billing_cycle_start_day(db: AsyncSession, day: int) -> None:
+    await put_setting(db, BILLING_CYCLE_START_DAY_KEY, str(max(1, min(28, int(day)))))
+
+
+async def check_and_reserve_monthly_budget(
+    db: AsyncSession,
+    additional_units: int = 1,
+    current_slot_id: Optional[int] = None,
+    current_direct_id: Optional[int] = None,
+    ref_date: Optional[datetime] = None,
+) -> tuple[bool, int, int]:
+    """Check if additional_units can be sent within the active monthly sending budget.
+
+    Takes into account:
+    - Successfully sent EmailLog within current billing period
+    - Successfully sent DirectEmail within current billing period
+    - In-flight QueueSlot ('processing') claimed within the last 5 minutes (excluding current_slot_id)
+    - In-flight DirectEmail ('sending') updated within the last 5 minutes (excluding current_direct_id)
+
+    Returns:
+        (is_allowed: bool, total_consumed: int, remaining_budget: int)
+    """
+    from app.models import EmailLog, DirectEmail, QueueSlot
+
+    budget = await get_monthly_sending_budget(db)
+    if budget <= 0:
+        return True, 0, 0
+
+    now_utc = ref_date or datetime.now(timezone.utc).replace(tzinfo=None)
+    cycle_day = await get_billing_cycle_start_day(db)
+    start_utc, end_utc = get_billing_period_bounds(ref_date=now_utc, cycle_start_day=cycle_day)
+    stale_threshold = now_utc - timedelta(minutes=5)
+
+    # 1. Committed EmailLog
+    log_res = await db.execute(
+        select(func.count(EmailLog.id)).where(
+            EmailLog.sent_at >= start_utc,
+            EmailLog.sent_at < end_utc,
+        )
+    )
+    email_logs_sent = log_res.scalar() or 0
+
+    # 2. Committed DirectEmail
+    direct_res = await db.execute(
+        select(func.count(DirectEmail.id)).where(
+            DirectEmail.status == "sent",
+            DirectEmail.sent_at >= start_utc,
+            DirectEmail.sent_at < end_utc,
+        )
+    )
+    direct_sent = direct_res.scalar() or 0
+
+    # 3. In-flight QueueSlot (status == 'processing' claimed within 5 mins)
+    slot_conds = [
+        QueueSlot.status == "processing",
+        QueueSlot.claimed_at.isnot(None),
+        QueueSlot.claimed_at >= stale_threshold,
+    ]
+    if current_slot_id is not None:
+        slot_conds.append(QueueSlot.id != current_slot_id)
+    inflight_slots = (await db.execute(select(func.count(QueueSlot.id)).where(*slot_conds))).scalar() or 0
+
+    # 4. In-flight DirectEmail (status == 'sending' updated within 5 mins)
+    direct_inflight_conds = [
+        DirectEmail.status == "sending",
+        DirectEmail.updated_at >= stale_threshold,
+    ]
+    if current_direct_id is not None:
+        direct_inflight_conds.append(DirectEmail.id != current_direct_id)
+    inflight_direct = (await db.execute(select(func.count(DirectEmail.id)).where(*direct_inflight_conds))).scalar() or 0
+
+    # 5. Uncertain QueueSlot (status == 'uncertain' in current cycle)
+    uncertain_slot_conds = [
+        QueueSlot.status == "uncertain",
+        func.coalesce(QueueSlot.claimed_at, QueueSlot.scheduled_date) >= start_utc,
+        func.coalesce(QueueSlot.claimed_at, QueueSlot.scheduled_date) < end_utc,
+    ]
+    if current_slot_id is not None:
+        uncertain_slot_conds.append(QueueSlot.id != current_slot_id)
+    uncertain_slots = (await db.execute(select(func.count(QueueSlot.id)).where(*uncertain_slot_conds))).scalar() or 0
+
+    # 6. Uncertain DirectEmail (status == 'uncertain' in current cycle)
+    uncertain_direct_conds = [
+        DirectEmail.status == "uncertain",
+        func.coalesce(DirectEmail.updated_at, DirectEmail.created_at) >= start_utc,
+        func.coalesce(DirectEmail.updated_at, DirectEmail.created_at) < end_utc,
+    ]
+    if current_direct_id is not None:
+        uncertain_direct_conds.append(DirectEmail.id != current_direct_id)
+    uncertain_direct = (await db.execute(select(func.count(DirectEmail.id)).where(*uncertain_direct_conds))).scalar() or 0
+
+    total_consumed = email_logs_sent + direct_sent + inflight_slots + inflight_direct + uncertain_slots + uncertain_direct
+    is_allowed = (total_consumed + additional_units) <= budget
+    remaining = max(0, budget - total_consumed)
+    return is_allowed, total_consumed, remaining
+
+
+async def get_monthly_sending_stats(db: AsyncSession) -> dict:
+    """Calculate real-time monthly budget metrics across all campaigns and inboxes."""
+    from app.models import EmailLog, DirectEmail, Inbox, QueueSlot
+
+    budget = await get_monthly_sending_budget(db)
+    cycle_day = await get_billing_cycle_start_day(db)
+    start_utc, end_utc = get_billing_period_bounds(cycle_start_day=cycle_day)
+
+    # Count EmailLog sent in current cycle
+    log_res = await db.execute(
+        select(func.count(EmailLog.id)).where(
+            EmailLog.sent_at >= start_utc,
+            EmailLog.sent_at < end_utc,
+        )
+    )
+    email_logs_sent = log_res.scalar() or 0
+
+    # Count DirectEmail sent in current cycle
+    direct_res = await db.execute(
+        select(func.count(DirectEmail.id)).where(
+            DirectEmail.status == "sent",
+            DirectEmail.sent_at >= start_utc,
+            DirectEmail.sent_at < end_utc,
+        )
+    )
+    direct_sent = direct_res.scalar() or 0
+
+    # Count in-flight operations
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    stale_threshold = now_utc - timedelta(minutes=5)
+
+    inflight_slots_res = await db.execute(
+        select(func.count(QueueSlot.id)).where(
+            QueueSlot.status == "processing",
+            QueueSlot.claimed_at.isnot(None),
+            QueueSlot.claimed_at >= stale_threshold,
+        )
+    )
+    inflight_slots = inflight_slots_res.scalar() or 0
+
+    inflight_direct_res = await db.execute(
+        select(func.count(DirectEmail.id)).where(
+            DirectEmail.status == "sending",
+            DirectEmail.updated_at >= stale_threshold,
+        )
+    )
+    inflight_direct = inflight_direct_res.scalar() or 0
+
+    # Count uncertain operations
+    uncertain_slots_res = await db.execute(
+        select(func.count(QueueSlot.id)).where(
+            QueueSlot.status == "uncertain",
+            func.coalesce(QueueSlot.claimed_at, QueueSlot.scheduled_date) >= start_utc,
+            func.coalesce(QueueSlot.claimed_at, QueueSlot.scheduled_date) < end_utc,
+        )
+    )
+    uncertain_slots = uncertain_slots_res.scalar() or 0
+
+    uncertain_direct_res = await db.execute(
+        select(func.count(DirectEmail.id)).where(
+            DirectEmail.status == "uncertain",
+            func.coalesce(DirectEmail.updated_at, DirectEmail.created_at) >= start_utc,
+            func.coalesce(DirectEmail.updated_at, DirectEmail.created_at) < end_utc,
+        )
+    )
+    uncertain_direct = uncertain_direct_res.scalar() or 0
+    total_uncertain = uncertain_slots + uncertain_direct
+
+    total_committed = email_logs_sent + direct_sent
+    total_in_flight = inflight_slots + inflight_direct
+    total_consumed = total_committed + total_in_flight + total_uncertain
+    remaining = max(0, budget - total_consumed) if budget > 0 else 0
+    usage_pct = round((total_consumed / budget * 100), 2) if budget > 0 else 0.0
+
+    inboxes_res = await db.execute(
+        select(Inbox.id, Inbox.email, Inbox.display_name, Inbox.paused, Inbox.provider).where(
+            Inbox.paused == False
+        )
+    )
+    active_inboxes = [
+        {"id": r[0], "email": r[1], "display_name": r[2] or r[1], "provider": r[4]}
+        for r in inboxes_res.all()
+    ]
+
+    return {
+        "monthly_budget": budget,
+        "sent_this_month": total_consumed,
+        "committed_sent": total_committed,
+        "in_flight": total_in_flight,
+        "uncertain_count": total_uncertain,
+        "remaining_budget": remaining,
+        "usage_percentage": min(100.0, usage_pct),
+        "is_exhausted": total_consumed >= budget if budget > 0 else False,
+        "billing_period_start": start_utc.isoformat() + "Z",
+        "billing_period_end": end_utc.isoformat() + "Z",
+        "billing_cycle_start_day": cycle_day,
+        "active_inboxes_count": len(active_inboxes),
+        "active_inboxes": active_inboxes,
+    }
+

@@ -7,11 +7,13 @@
 import asyncio
 import logging
 import random
+import os
 import re
 import secrets
+import uuid
 from datetime import datetime, date, time, timedelta
 from email.utils import make_msgid
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 try:
@@ -37,13 +39,19 @@ from app.models import (
     GmailMessage,
     Office365Message,
     CustomEmailOverride,
+    DirectEmail,
 )
-from app.sender import send_email, render_body, get_lead_data, RenderContext, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
+from app.sender import send_email, render_body, get_lead_data, RenderContext, SendResult, SendFailure, SendUncertain, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
 from app.email_html import normalize_email_html
 from app.webhooks import fire_webhook_event
-from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials
+from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials, get_monthly_sending_budget, check_and_reserve_monthly_budget
 from app import time as time_provider
-from app.queue_logic import _parse_time, compute_effective_daily_limit
+from app.queue_logic import (
+    _parse_time,
+    compute_effective_daily_limit,
+    _get_tz,
+    _utc_bounds_for_campaign_day,
+)
 from app.campaign_lead_status import campaign_lead_may_receive_sends
 
 log = logging.getLogger(__name__)
@@ -158,27 +166,38 @@ last_send_job_sent_count: int = 0
 
 
 
-def _in_sending_window(now_utc: datetime, campaign: Campaign) -> bool:
+def _in_sending_window(now_utc: datetime | None, campaign: Campaign) -> bool:
     """Check if *now_utc* falls within the campaign's sending days and hours.
 
     The campaign's ``sending_hours_start`` / ``sending_hours_end`` are expressed
-    in its configured timezone (e.g. Africa/Cairo).  We convert ``now_utc`` to
+    in its configured timezone (e.g. America/Chicago). We convert ``now_utc`` to
     that timezone before comparing so the gate-check is always correct regardless
     of which UTC offset the server runs at.
     """
+    if now_utc is None:
+        now_utc = time_provider.utcnow()
     tz_name = getattr(campaign, "timezone", None)
     if ZoneInfo and tz_name:
         try:
             tz = ZoneInfo(tz_name)
-            # now_utc is a naive datetime from time_provider.now() which
-            # returns server-local time; in Docker that equals UTC.
-            now_local = now_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz).replace(tzinfo=None)
+            if now_utc.tzinfo is None:
+                utc_aware = now_utc.replace(tzinfo=ZoneInfo("UTC"))
+            else:
+                utc_aware = now_utc.astimezone(ZoneInfo("UTC"))
+            now_local = utc_aware.astimezone(tz).replace(tzinfo=None)
         except Exception:
             now_local = now_utc
     else:
         now_local = now_utc
 
-    if campaign.sending_days is None or now_local.weekday() not in campaign.sending_days:
+    sending_days = campaign.sending_days
+    if isinstance(sending_days, str):
+        try:
+            import json
+            sending_days = json.loads(sending_days)
+        except Exception:
+            sending_days = None
+    if sending_days is None or now_local.weekday() not in sending_days:
         return False
     start = _parse_time(campaign.sending_hours_start or "09:00")
     end = _parse_time(campaign.sending_hours_end or "17:00")
@@ -188,13 +207,10 @@ def _in_sending_window(now_utc: datetime, campaign: Campaign) -> bool:
 async def run_send_job():
     """Run once: send today's due emails. Slots are per inbox (QueueSlot.inbox_id)."""
     global last_send_job_run, last_send_job_sent_count
-    # Use local time so we match queue_logic (slots are stored in local time) and sending window (09:00–17:00 is local)
-    now = time_provider.now()
-    log.info("Send job running at %s (local)", now.isoformat())
+    now_utc = time_provider.utcnow()
+    log.info("Send job running at %s (UTC)", now_utc.isoformat())
 
     async with AsyncSessionLocal() as session:
-        today = now.date()
-
         result = await session.execute(select(Inbox).where(Inbox.paused == False))  # noqa: E712
         inboxes = result.scalars().all()
 
@@ -210,24 +226,29 @@ async def run_send_job():
         _fallback_tracking_base = _settings.base_url.rstrip("/")
 
         for inbox in inboxes:
-            if _inbox_auth_cooldown_active(inbox.id, now):
+            if _inbox_auth_cooldown_active(inbox.id, now_utc):
                 log.warning(
                     "Send job: inbox %s in auth-failure cooldown – skipping", inbox.email
                 )
                 continue
-            # compute how many emails already sent today so we enforce a hard
-            # daily cap rather than only relying on ``sent_this_inbox`` below.
-            # Use the warmup-aware effective limit so ramp-up is respected.
-            max_per_day = compute_effective_daily_limit(inbox)
-            sent_count_result = await session.execute(
-                select(func.count(EmailLog.id))
-                .where(
-                    EmailLog.inbox_id == inbox.id,
-                    func.date(EmailLog.sent_at) == today,
+            # compute how many emails already sent today. When Global Monthly Budget
+            # is active, do not enforce arbitrary 50/day limits unless warmup ramp-up is enabled.
+            monthly_budget = await get_monthly_sending_budget(session)
+            enforce_daily = (monthly_budget is None or monthly_budget <= 0) or getattr(inbox, "ramp_up_enabled", False)
+            if enforce_daily:
+                max_per_day = compute_effective_daily_limit(inbox)
+                sent_count_result = await session.execute(
+                    select(func.count(EmailLog.id))
+                    .where(
+                        EmailLog.inbox_id == inbox.id,
+                        func.date(EmailLog.sent_at) == now_utc.date(),
+                    )
                 )
-            )
-            already_sent = sent_count_result.scalar() or 0
-            quota_remaining = max_per_day - already_sent
+                already_sent = sent_count_result.scalar() or 0
+                quota_remaining = max_per_day - already_sent
+            else:
+                max_per_day = 999999
+                quota_remaining = 999999
 
             result = await session.execute(
                 select(QueueSlot, CampaignLead, Campaign, Lead, Sequence)
@@ -242,8 +263,7 @@ async def run_send_job():
                 .options(selectinload(Sequence.variants))
                 .where(
                     QueueSlot.inbox_id == inbox.id,
-                    func.date(QueueSlot.scheduled_date) == today,
-                    QueueSlot.scheduled_date <= now,
+                    QueueSlot.scheduled_date <= now_utc,
                 )
                 .order_by(QueueSlot.scheduled_date, QueueSlot.position_in_day)
             )
@@ -378,7 +398,12 @@ async def run_send_job():
                 # HARD LIMIT: rate/minutes between messages
                 if last_sent_time is not None:
                     delta = now - last_sent_time
-                    required = timedelta(minutes=inbox.wait_minutes_between)
+                    camp_interval = getattr(campaign, "wait_minutes_between", None)
+                    if monthly_budget is not None and monthly_budget > 0 and camp_interval is not None and camp_interval > 0:
+                        wait_mins = camp_interval
+                    else:
+                        wait_mins = inbox.wait_minutes_between
+                    required = timedelta(minutes=wait_mins)
                     # allow up to 20 second of slack before firing rate_limit
                     if delta + timedelta(seconds=20) < required:
                         # Try recalculation to spread slots out
@@ -916,19 +941,28 @@ async def run_send_job():
                         await session.commit()
                         raise
 
-                # ── Handle permanent failure (bounce / auth) ─────────────────
+                # ── Handle permanent or temporary failure (bounce / rate-limit / auth) ────────
                 if isinstance(result, SendFailure):
                     log.warning(
-                        "Permanent send failure for lead_id=%s inbox=%s: [%s] %s",
-                        lead.id, inbox.email, result.error_type, result.message,
+                        "Send failure for lead_id=%s inbox=%s: [%s] %s (bounce_type=%s)",
+                        lead.id, inbox.email, result.error_type, result.message, getattr(result, "bounce_type", "hard_bounce"),
                     )
                     # Delete the pre-created log entry
                     await session.delete(email_log_entry)
 
-                    # Mark lead as bounced and delete remaining queue slots
-                    if result.error_type in ("bounce", "invalid_recipient"):
+                    # Mark lead as bounced / temporary failure and delete remaining queue slots
+                    if result.error_type in ("bounce", "invalid_recipient", "temporary_failure"):
                         prev_enr = getattr(cl, "enrollment_status", None) or "active"
                         cl.enrollment_status = "bounced"
+                        b_type = getattr(result, "bounce_type", "hard_bounce")
+                        cl.bounce_type = b_type
+                        cl.failure_reason = result.message
+
+                        # Only mark global Lead.status = "bounced" if it is a confirmed recipient hard bounce.
+                        # Never poison the central Lead record on temporary quota / rate-limit failures!
+                        if b_type == "hard_bounce":
+                            lead.status = "bounced"
+
                         # Delete ALL remaining queue slots for this lead+campaign
                         from sqlalchemy import delete as sql_delete
                         await session.execute(
@@ -942,6 +976,7 @@ async def run_send_job():
                             "campaign_id": campaign.id,
                             "inbox_id": inbox.id,
                             "error_type": result.error_type,
+                            "bounce_type": b_type,
                             "error_message": result.message,
                             "timestamp": time_provider.utcnow().isoformat() + "Z",
                         })
@@ -951,6 +986,7 @@ async def run_send_job():
                             "campaign_id": campaign.id,
                             "old_enrollment_status": prev_enr,
                             "new_enrollment_status": "bounced",
+                            "bounce_type": b_type,
                             "reason": result.message,
                             "timestamp": time_provider.utcnow().isoformat() + "Z",
                         })
@@ -1140,6 +1176,22 @@ async def run_send_job():
     log.info("Send job finished: %d email(s) sent (next run in %d min)", total_sent, settings.queue_check_interval_minutes)
 
 
+def is_worker_alive(worker_id: str | None) -> bool:
+    """Check if worker process that claimed the slot is still actively running on this host."""
+    if not worker_id or not worker_id.startswith("worker-"):
+        return False
+    parts = worker_id.split("-")
+    if len(parts) >= 2 and parts[1].isdigit():
+        pid = int(parts[1])
+        if pid == os.getpid():
+            return True
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    return False
+
 # ---------------------------------------------------------------------------
 # Per-slot job: fired by APScheduler at the slot's exact scheduled_date
 # ---------------------------------------------------------------------------
@@ -1155,10 +1207,106 @@ async def send_slot_job(slot_id: int) -> None:
     """
     global last_send_job_run, last_send_job_sent_count
 
-    now = time_provider.now()
-    log.info("send_slot_job: slot_id=%d firing at %s", slot_id, now.isoformat())
+    now_utc = time_provider.utcnow()
+    log.info("send_slot_job: slot_id=%d firing at %s (UTC)", slot_id, now_utc.isoformat())
 
     async with AsyncSessionLocal() as session:
+        # ── Atomic Budget Reservation and Slot Claim ─────────────────────
+        worker_id = f"worker-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        stale_threshold = now_utc - timedelta(minutes=5)
+
+        from app.app_settings import (
+            get_claim_lock,
+            acquire_db_budget_lock,
+            check_and_reserve_monthly_budget,
+            get_monthly_sending_budget,
+        )
+        async with get_claim_lock():
+            # Cross-process DB-level transaction synchronization
+            await acquire_db_budget_lock(session)
+
+            # Check if already processing and active (or worker is still alive)
+            existing_res = await session.execute(
+                select(QueueSlot.status, QueueSlot.claimed_at, QueueSlot.claimed_by)
+                .where(QueueSlot.id == slot_id)
+            )
+            slot_curr = existing_res.first()
+            if slot_curr and slot_curr[0] == "processing":
+                curr_status, curr_claimed_at, curr_claimed_by = slot_curr
+                if curr_claimed_at and curr_claimed_at >= stale_threshold:
+                    log.info("send_slot_job: slot %d currently processing by %s, skipping", slot_id, curr_claimed_by)
+                    return
+
+                # Pre-reclamation idempotency check: was this slot already sent and logged before worker/heartbeat stalled?
+                slot_data_res = await session.execute(
+                    select(QueueSlot, CampaignLead)
+                    .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
+                    .where(QueueSlot.id == slot_id)
+                )
+                slot_data = slot_data_res.first()
+                if slot_data:
+                    q_slot, c_lead = slot_data
+                    elog_check = await session.execute(
+                        select(EmailLog.id).where(
+                            EmailLog.campaign_id == c_lead.campaign_id,
+                            EmailLog.lead_id == c_lead.lead_id,
+                            EmailLog.sequence_index == q_slot.sequence_index,
+                        )
+                    )
+                    if elog_check.scalar_one_or_none():
+                        # The email was already dispatched and recorded! Update slot to sent, do NOT re-send!
+                        await session.execute(
+                            update(QueueSlot)
+                            .where(QueueSlot.id == slot_id)
+                            .values(status="sent", claimed_at=None, claimed_by=None)
+                        )
+                        await session.commit()
+                        log.info("send_slot_job: slot %d already logged in EmailLog; safely marked 'sent' without duplicate send.", slot_id)
+                        return
+
+                hard_stale_threshold = now_utc - timedelta(minutes=10)
+                if is_worker_alive(curr_claimed_by):
+                    if curr_claimed_at and curr_claimed_at >= hard_stale_threshold:
+                        log.warning(
+                            "send_slot_job: slot %d claimed_at older than 5m but worker %s is still alive. Skipping reclamation.",
+                            slot_id, curr_claimed_by,
+                        )
+                        return
+                    log.warning(
+                        "send_slot_job: slot %d worker %s is alive but heartbeat stalled for >10m and no EmailLog found. Reclaiming safely.",
+                        slot_id, curr_claimed_by,
+                    )
+
+            # 1. Global Monthly Sending Budget Enforcement
+            monthly_budget = await get_monthly_sending_budget(session)
+            if monthly_budget is not None and monthly_budget > 0:
+                is_allowed, total_consumed, remaining_budget = await check_and_reserve_monthly_budget(
+                    session, additional_units=1, current_slot_id=slot_id, ref_date=now_utc
+                )
+                if not is_allowed:
+                    log.warning(
+                        "send_slot_job: Global monthly sending budget reached (%d/%d consumed). "
+                        "Skipping dispatch for slot %d until next billing period.",
+                        total_consumed, monthly_budget, slot_id,
+                    )
+                    return
+
+            # 2. Claim the slot atomically
+            claim_stmt = (
+                update(QueueSlot)
+                .where(
+                    QueueSlot.id == slot_id,
+                    (QueueSlot.status == "scheduled") |
+                    ((QueueSlot.status == "processing") & (QueueSlot.claimed_at < stale_threshold))
+                )
+                .values(status="processing", claimed_at=now_utc, claimed_by=worker_id)
+            )
+            claim_res = await session.execute(claim_stmt)
+            await session.commit()
+            if claim_res.rowcount == 0:
+                log.info("send_slot_job: slot %d already claimed or in processing, skipping", slot_id)
+                return
+
         # ── Load slot + all related entities in one query ────────────────
         slot_res = await session.execute(
             select(QueueSlot, CampaignLead, Campaign, Lead, Sequence, Inbox)
@@ -1183,16 +1331,28 @@ async def send_slot_job(slot_id: int) -> None:
 
         # ── Pre-flight checks ────────────────────────────────────────────
         if inbox.paused:
-            log.info("send_slot_job: inbox %s paused, skipping slot %d", inbox.email, slot_id)
+            log.info("send_slot_job: inbox %s paused, releasing slot %d", inbox.email, slot_id)
+            await session.execute(
+                update(QueueSlot).where(QueueSlot.id == slot_id).values(status="scheduled", claimed_at=None, claimed_by=None)
+            )
+            await session.commit()
             return
-        if _inbox_auth_cooldown_active(inbox.id, now):
+        if _inbox_auth_cooldown_active(inbox.id, now_utc):
             log.warning(
-                "send_slot_job: inbox %s in auth-failure cooldown, skipping slot %d",
+                "send_slot_job: inbox %s in auth-failure cooldown, releasing slot %d",
                 inbox.email, slot_id,
             )
+            await session.execute(
+                update(QueueSlot).where(QueueSlot.id == slot_id).values(status="scheduled", claimed_at=None, claimed_by=None)
+            )
+            await session.commit()
             return
         if getattr(campaign, "paused", False):
-            log.info("send_slot_job: campaign %d paused, skipping slot %d", campaign.id, slot_id)
+            log.info("send_slot_job: campaign %d paused, releasing slot %d", campaign.id, slot_id)
+            await session.execute(
+                update(QueueSlot).where(QueueSlot.id == slot_id).values(status="scheduled", claimed_at=None, claimed_by=None)
+            )
+            await session.commit()
             return
         if not campaign_lead_may_receive_sends(cl, lead):
             log.info(
@@ -1202,32 +1362,59 @@ async def send_slot_job(slot_id: int) -> None:
             await session.delete(slot)
             await session.commit()
             return
-        if not _in_sending_window(now, campaign):
-            log.info("send_slot_job: outside sending window for campaign %d, skipping slot %d",
+        if not _in_sending_window(now_utc, campaign):
+            log.info("send_slot_job: outside sending window for campaign %d, releasing slot %d",
                      campaign.id, slot_id)
-            return
-
-        # ── Daily quota check ────────────────────────────────────────────
-        today = now.date()
-        max_per_day = compute_effective_daily_limit(inbox)
-        sent_count_res = await session.execute(
-            select(func.count(EmailLog.id))
-            .where(EmailLog.inbox_id == inbox.id, func.date(EmailLog.sent_at) == today)
-        )
-        already_sent = sent_count_res.scalar() or 0
-        if already_sent >= max_per_day:
-            log.warning(
-                "send_slot_job: daily limit hit for inbox %s (sent=%d cap=%d), skipping slot %d",
-                inbox.email, already_sent, max_per_day, slot_id,
-            )
-            await fire_webhook_event(
-                session, "daily_limit",
-                {"inbox_id": inbox.id, "inbox_email": inbox.email, "date": str(today)},
+            await session.execute(
+                update(QueueSlot).where(QueueSlot.id == slot_id).values(status="scheduled", claimed_at=None, claimed_by=None)
             )
             await session.commit()
             return
 
+        # ── Daily quota check ────────────────────────────────────────────
+        # When Global Monthly Sending Budget is enabled, do not enforce arbitrary per-inbox
+        # daily limits (e.g. 50/day) unless genuine warmup ramp-up is enabled on this inbox.
+        enforce_daily = (monthly_budget is None or monthly_budget <= 0) or getattr(inbox, "ramp_up_enabled", False)
+        if enforce_daily:
+            tz = _get_tz(getattr(campaign, "timezone", None))
+            if tz and ZoneInfo:
+                campaign_today = now_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz).date()
+            else:
+                campaign_today = now_utc.date()
+            day_start_utc, day_end_utc = _utc_bounds_for_campaign_day(campaign_today, campaign)
+            max_per_day = compute_effective_daily_limit(inbox)
+            sent_count_res = await session.execute(
+                select(func.count(EmailLog.id))
+                .where(
+                    EmailLog.inbox_id == inbox.id,
+                    EmailLog.sent_at >= day_start_utc,
+                    EmailLog.sent_at < day_end_utc,
+                )
+            )
+            already_sent = sent_count_res.scalar() or 0
+            if already_sent >= max_per_day:
+                log.warning(
+                    "send_slot_job: daily limit hit for inbox %s (sent=%d cap=%d), releasing slot %d",
+                    inbox.email, already_sent, max_per_day, slot_id,
+                )
+                await fire_webhook_event(
+                    session, "daily_limit",
+                    {"inbox_id": inbox.id, "inbox_email": inbox.email, "date": str(campaign_today)},
+                )
+                await session.execute(
+                    update(QueueSlot).where(QueueSlot.id == slot_id).values(status="scheduled", claimed_at=None, claimed_by=None)
+                )
+                await session.commit()
+                return
+
         # ── Rate-limit check ─────────────────────────────────────────────
+        # If Global Monthly Sending Budget is active, campaign settings control intervals
+        camp_interval = getattr(campaign, "wait_minutes_between", None)
+        if monthly_budget is not None and monthly_budget > 0 and camp_interval is not None and camp_interval > 0:
+            wait_mins = camp_interval
+        else:
+            wait_mins = inbox.wait_minutes_between
+
         last_sent_res = await session.execute(
             select(EmailLog.sent_at)
             .where(EmailLog.inbox_id == inbox.id)
@@ -1236,22 +1423,16 @@ async def send_slot_job(slot_id: int) -> None:
         )
         last_sent_time = last_sent_res.scalar_one_or_none()
         if last_sent_time is not None:
-            delta = now - last_sent_time
-            required = timedelta(minutes=inbox.wait_minutes_between)
+            delta = now_utc - last_sent_time
+            required = timedelta(minutes=wait_mins)
             if delta + timedelta(seconds=20) < required:
                 log.info(
                     "send_slot_job: rate limit for inbox %s – "
-                    "last sent %s ago (need %s), skipping slot %d",
+                    "last sent %s ago (need %s), releasing slot %d",
                     inbox.email, delta, required, slot_id,
                 )
-                await fire_webhook_event(
-                    session, "rate_limit",
-                    {
-                        "inbox_id": inbox.id, "inbox_email": inbox.email,
-                        "last_sent": last_sent_time.isoformat(),
-                        "now": now.isoformat(),
-                        "wait_minutes": inbox.wait_minutes_between,
-                    },
+                await session.execute(
+                    update(QueueSlot).where(QueueSlot.id == slot_id).values(status="scheduled", claimed_at=None, claimed_by=None)
                 )
                 await session.commit()
                 return
@@ -1698,6 +1879,27 @@ async def send_slot_job(slot_id: int) -> None:
             # ``send_email`` is synchronous (smtplib / urllib / Gmail client) —
             # run it in a worker thread so a slow or hanging relay cannot stall
             # the event loop (and every HTTP request served by it).
+            stop_heartbeat = asyncio.Event()
+
+            async def _slot_heartbeat():
+                while not stop_heartbeat.is_set():
+                    try:
+                        await asyncio.wait_for(stop_heartbeat.wait(), timeout=30.0)
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+                    try:
+                        async with AsyncSessionLocal() as hb_session:
+                            await hb_session.execute(
+                                update(QueueSlot)
+                                .where(QueueSlot.id == slot_id, QueueSlot.status == "processing")
+                                .values(claimed_at=time_provider.utcnow())
+                            )
+                            await hb_session.commit()
+                    except Exception:
+                        pass
+
+            hb_task = asyncio.create_task(_slot_heartbeat())
             try:
                 result = await asyncio.to_thread(
                     send_email,
@@ -1726,18 +1928,20 @@ async def send_slot_job(slot_id: int) -> None:
                     smtp_account=smtp_account,
                 )
             except Exception:
-                # Unexpected error from send_email: the pre-created EmailLog row
-                # was committed before the network call.  Drop it so it does not
-                # consume daily quota / count as a sent campaign step, then let
-                # _dispatch_slot's handler log it (the slot stays queued).
                 log.exception(
                     "send_slot_job: send_email raised for slot %d (lead_id=%s); "
-                    "rolling back pre-created email log",
+                    "rolling back pre-created email log and releasing slot",
                     slot_id, lead.id,
                 )
                 await session.delete(email_log_entry)
+                await session.execute(
+                    update(QueueSlot).where(QueueSlot.id == slot_id).values(status="scheduled", claimed_at=None, claimed_by=None)
+                )
                 await session.commit()
                 raise
+            finally:
+                stop_heartbeat.set()
+                await hb_task
 
         # ── Permanent failure ─────────────────────────────────────────────
         if isinstance(result, SendFailure):
@@ -1767,7 +1971,7 @@ async def send_slot_job(slot_id: int) -> None:
                     "timestamp": time_provider.utcnow().isoformat() + "Z",
                 })
             elif result.error_type in ("auth_failed", "permission_denied"):
-                _mark_inbox_auth_failure(inbox.id, now)
+                _mark_inbox_auth_failure(inbox.id, now_utc)
                 if not inbox.paused:
                     log.warning(
                         "send_slot_job: pausing inbox %s after %s — sending stops until "
@@ -1775,19 +1979,47 @@ async def send_slot_job(slot_id: int) -> None:
                         inbox.email, result.error_type,
                     )
                     inbox.paused = True
+                await session.execute(
+                    update(QueueSlot).where(QueueSlot.id == slot_id).values(status="scheduled", claimed_at=None, claimed_by=None)
+                )
                 await fire_webhook_event(
                     session, "token_expired", _auth_failure_event_data(inbox, result)
                 )
             await session.commit()
             return
 
+        # ── Ambiguous Send Outcome (Uncertain Delivery) ───────────────────
+        if isinstance(result, SendUncertain):
+            log.warning(
+                "send_slot_job: ambiguous send outcome for slot %d lead %s (reason: %s). "
+                "Marking slot as 'uncertain' for reconciliation instead of blindly resending.",
+                slot_id, lead.email, result.reason,
+            )
+            await session.delete(email_log_entry)
+            await session.execute(
+                update(QueueSlot)
+                .where(QueueSlot.id == slot_id)
+                .values(
+                    status="uncertain",
+                    claimed_by="needs_reconciliation",
+                    claimed_at=time_provider.utcnow(),
+                )
+            )
+            await session.commit()
+            return
+
         if not result:
-            # Transient failure – roll back the pre-created log; slot stays for retry
+            # Transient failure – roll back the pre-created log; release slot for retry
             await session.delete(email_log_entry)
             await _alert_repeated_send_failure(
                 session, inbox, getattr(smtp_account, "last_send_error", "") or ""
             )
+            await session.execute(
+                update(QueueSlot).where(QueueSlot.id == slot_id).values(status="scheduled", claimed_at=None, claimed_by=None)
+            )
             await session.commit()
+            log.warning("send_slot_job: transient failure for slot %d, slot released for retry", slot_id)
+            return
             log.warning("send_slot_job: transient failure for slot %d, slot retained for retry", slot_id)
             return
 
@@ -1948,13 +2180,18 @@ async def run_slot_scan_job() -> None:
     ``_pending_slot_ids`` prevents double-dispatch when two scan ticks see the
     same slot inside their overlapping 60-second windows.
     """
-    now = time_provider.now()
-    window_end = now + timedelta(seconds=60)
+    now_utc = time_provider.utcnow()
+    window_end = now_utc + timedelta(seconds=60)
 
     async with AsyncSessionLocal() as session:
+        stale_threshold = now_utc - timedelta(minutes=5)
         due_res = await session.execute(
             select(QueueSlot.id, QueueSlot.scheduled_date)
-            .where(QueueSlot.scheduled_date <= window_end)
+            .where(
+                QueueSlot.scheduled_date <= window_end,
+                (QueueSlot.status == "scheduled") |
+                ((QueueSlot.status == "processing") & (QueueSlot.claimed_at < stale_threshold)),
+            )
             .order_by(QueueSlot.scheduled_date, QueueSlot.position_in_day)
         )
         rows = due_res.all()
@@ -1966,15 +2203,15 @@ async def run_slot_scan_job() -> None:
     for slot_id, scheduled_date in rows:
         if slot_id in _pending_slot_ids:
             continue
-        delay = (scheduled_date - now).total_seconds()
+        delay = max(0.0, (scheduled_date - now_utc).total_seconds())
         _pending_slot_ids.add(slot_id)
         asyncio.create_task(_dispatch_slot(slot_id, delay))
         dispatched += 1
 
     if dispatched:
         log.info(
-            "run_slot_scan_job: dispatched %d task(s) (window %s → +60 s)",
-            dispatched, now.isoformat(),
+            "run_slot_scan_job: dispatched %d task(s) (window %s → +60 s UTC)",
+            dispatched, now_utc.isoformat(),
         )
 
 

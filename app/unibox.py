@@ -29,6 +29,7 @@ from app.models import (
     Office365Account, Office365Message, Office365SyncState, Office365Thread,
     SmtpAccount, SmtpMessage, SmtpSyncState, SmtpThread,
     Inbox, Lead, LeadReply, EmailLog, CampaignLead, QueueSlot,
+    EmailAttachment, EmailDraft,
 )
 from app.routers.gmail_oauth import refresh_access_token
 from app.routers.office365_oauth import refresh_access_token as refresh_office365_token
@@ -1484,6 +1485,24 @@ async def _get_smtp_thread_messages(
     )
     messages = msg_rows.scalars().all()
 
+    # Pre-fetch attachments for messages
+    msg_ids = [m.message_id for m in messages]
+    attachments_by_msg = {}
+    if msg_ids:
+        att_rows = await db.execute(
+            select(EmailAttachment).where(
+                EmailAttachment.inbox_id == inbox_id,
+                EmailAttachment.message_id.in_(msg_ids),
+            )
+        )
+        for att in att_rows.scalars().all():
+            attachments_by_msg.setdefault(att.message_id, []).append({
+                "id": att.id,
+                "filename": att.filename or "attachment",
+                "content_type": att.content_type,
+                "size_bytes": att.size_bytes or 0,
+            })
+
     out_messages: list[dict[str, Any]] = []
     subject = thread.subject or "(no subject)"
     for msg in messages:
@@ -1507,6 +1526,7 @@ async def _get_smtp_thread_messages(
                 "to": to_str,
                 "direction": msg.direction or "received",
                 "label_ids": [],
+                "attachments": attachments_by_msg.get(msg.message_id, []),
             }
         )
         if msg.subject and subject == "(no subject)":
@@ -2045,8 +2065,35 @@ async def list_unibox_conversations(
     page_size: int,
     leads_only: bool = False,
     lead_status: str | None = None,
+    tracking_filter: str | None = None,
+    folder: str | None = None,
 ) -> dict[str, Any]:
     offset = (page - 1) * page_size
+
+    # Folder shortcut: Drafts
+    if folder and isinstance(folder, str) and folder.strip().lower() == "drafts":
+        draft_stmt = select(EmailDraft, Inbox.email).join(Inbox, Inbox.id == EmailDraft.inbox_id).order_by(desc(EmailDraft.updated_at))
+        draft_rows = (await db.execute(draft_stmt)).all()
+        draft_items = []
+        for d, inb_email in draft_rows:
+            draft_items.append({
+                "thread_id": d.thread_id or f"draft-{d.id}",
+                "inbox_id": d.inbox_id,
+                "inbox_account": inb_email,
+                "subject": d.subject or "(Draft) No subject",
+                "last_message_snippet": d.body_plain or d.body_html or "(Empty draft)",
+                "timestamp": _dt_to_iso(d.updated_at),
+                "is_lead_thread": False,
+                "is_draft": True,
+                "draft_id": d.id,
+                "to_email": d.to_email,
+            })
+        return {
+            "items": draft_items[offset: offset + page_size],
+            "page": page,
+            "page_size": page_size,
+            "total": len(draft_items),
+        }
 
     # Shared: one lead per thread (works for both Gmail thread_id and O365 conversation_id
     # because EmailLog.thread_id stores the conversation id for both providers).
@@ -2305,6 +2352,30 @@ async def list_unibox_conversations(
     # Unread lead replies pinned to top, then most recent first.
     items.sort(key=lambda x: (int(x["unread_lead_reply"]), x["_sort_ts"]), reverse=True)
 
+    # Enrich all items with aggregate tracking status
+    from app.unibox_tracking import batch_resolve_threads_tracking
+    await batch_resolve_threads_tracking(db, items)
+
+    if tracking_filter and isinstance(tracking_filter, str) and tracking_filter.strip():
+        tf = tracking_filter.strip().lower()
+        if tf == "open_detected":
+            items = [it for it in items if it.get("tracking_status") in ("open_detected", "clicked") or (it.get("open_count") or 0) > 0]
+        elif tf == "no_open_detected":
+            items = [it for it in items if it.get("tracking_status") == "no_open_detected"]
+        elif tf == "replied":
+            items = [it for it in items if it.get("tracking_status") == "replied"]
+        elif tf == "not_tracked":
+            items = [it for it in items if it.get("tracking_status") == "not_tracked"]
+
+    if folder and isinstance(folder, str) and folder.strip():
+        f_norm = folder.strip().lower()
+        if f_norm == "inbox":
+            items = [it for it in items if it.get("unread_lead_reply") or it.get("is_lead_thread") or it.get("direction") != "sent"]
+        elif f_norm == "sent":
+            items = [it for it in items if it.get("direction") == "sent" or it.get("tracking_status") in ("sent", "delivered", "open_detected", "clicked", "no_open_detected")]
+        elif f_norm == "replies":
+            items = [it for it in items if it.get("unread_lead_reply") or it.get("tracking_status") == "replied" or it.get("is_lead_thread")]
+
     total = len(items)
     page_items = items[offset: offset + page_size]
     for item in page_items:
@@ -2485,6 +2556,24 @@ async def _get_o365_thread_messages(
 
 
 async def get_thread_messages(
+    db: AsyncSession,
+    *,
+    thread_id: str,
+    inbox_id: int | None = None,
+) -> dict[str, Any] | None:
+    res = await _raw_get_thread_messages(db, thread_id=thread_id, inbox_id=inbox_id)
+    if res and res.get("messages"):
+        from app.unibox_tracking import enrich_thread_messages_with_tracking
+        await enrich_thread_messages_with_tracking(
+            db,
+            res["messages"],
+            thread_id=thread_id,
+            inbox_id=res.get("inbox_id") or inbox_id,
+        )
+    return res
+
+
+async def _raw_get_thread_messages(
     db: AsyncSession,
     *,
     thread_id: str,

@@ -12,6 +12,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     ForeignKeyConstraint,
     Integer,
@@ -120,6 +121,8 @@ class Inbox(Base):
     ramp_up_started_at = Column(DateTime, nullable=True, default=None)  # when ramp-up was (last) enabled
     paused = Column(Boolean, default=False, nullable=False)
     ramp_up_paused_at = Column(DateTime, nullable=True, default=None)  # when ramp-up was paused (for freezing warm-up)
+    inbound_type = Column(String(32), default="imap", nullable=False)  # imap | webhook
+    outbound_provider = Column(String(32), default="smtp", nullable=False)  # smtp | ses | postmark | resend
     campaign_inboxes = relationship("CampaignInbox", back_populates="inbox")
     gmail_account = relationship("GmailAccount", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
     gmail_sync_state = relationship("GmailSyncState", uselist=False, cascade="all, delete-orphan")
@@ -131,12 +134,18 @@ class Inbox(Base):
     smtp_account = relationship("SmtpAccount", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
     smtp_sync_state = relationship("SmtpSyncState", uselist=False, cascade="all, delete-orphan")
     smtp_threads = relationship("SmtpThread", back_populates="inbox", cascade="all, delete-orphan")
+    health_scans = relationship("DomainHealthScan", back_populates="inbox", cascade="all, delete-orphan", order_by="DomainHealthScan.scanned_at.desc()")
+    attachments = relationship("EmailAttachment", back_populates="inbox", cascade="all, delete-orphan")
+    drafts = relationship("EmailDraft", back_populates="inbox", cascade="all, delete-orphan")
 
 
 class Lead(Base):
     __tablename__ = "lead"
+    __table_args__ = (
+        UniqueConstraint("email", name="uq_lead_email"),
+    )
     id = Column(Integer, primary_key=True, index=True)
-    email = Column(String(255), nullable=False, index=True)
+    email = Column(String(255), nullable=False, unique=True, index=True)
     name = Column(String(255), default="")
     company = Column(String(255), default="")
     phone = Column(String(64), default="")
@@ -199,6 +208,7 @@ class Campaign(Base):
     # Custom sequence mode: wait_for_all (default) = don't send until all personalized
     # emails are written; asap = start sending each personalized email as soon as it's written
     custom_sequence_mode = Column(String(32), default="wait_for_all", nullable=False)
+    archived = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=_utcnow)
     campaign_inboxes = relationship(
         "CampaignInbox",
@@ -284,6 +294,7 @@ class CampaignLead(Base):
         Index("ix_campaign_lead_campaign_id", "campaign_id"),
         # Composite: inbox-persistence lookup and duplicate-enrollment check
         Index("ix_campaign_lead_lead_campaign", "lead_id", "campaign_id"),
+        UniqueConstraint("campaign_id", "lead_id", name="uq_campaign_lead"),
     )
     id = Column(Integer, primary_key=True, index=True)
     campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)
@@ -293,6 +304,9 @@ class CampaignLead(Base):
     enrollment_status = Column(String(32), nullable=False, default="active")
     # Reply intent (per campaign): interested, not_interested, out_of_office, auto_reply, or null
     interest_status = Column(String(32), nullable=True, default=None)
+    # Failure reason and bounce classification for delivery observability
+    failure_reason = Column(Text, nullable=True, default=None)
+    bounce_type = Column(String(32), nullable=True, default=None)  # hard_bounce | soft_bounce | temporary_failure
     # Whether sending is paused for this specific campaign-lead pair
     # (e.g. auto-paused by AI classifier when marked not_interested)
     sending_paused = Column(Boolean, default=False, nullable=False)
@@ -339,6 +353,7 @@ class QueueSlot(Base):
         Index("ix_queue_slot_scheduled_date_pos", "scheduled_date", "position_in_day"),
         # Composite: send job filters by (inbox_id, scheduled_date) on every tick
         Index("ix_queue_slot_inbox_date", "inbox_id", "scheduled_date"),
+        Index("ix_queue_slot_status_date", "status", "scheduled_date"),
     )
     id = Column(Integer, primary_key=True, index=True)
     campaign_lead_id = Column(Integer, ForeignKey("campaign_lead.id"), nullable=False)
@@ -350,6 +365,11 @@ class QueueSlot(Base):
     variant_id = Column(
         Integer, ForeignKey("sequence_variant.id", ondelete="SET NULL"), nullable=True, default=None
     )
+    # Status: 'scheduled', 'processing', 'failed' (database-safe atomic job claiming)
+    status = Column(String(32), nullable=False, default="scheduled", server_default="scheduled")
+    claimed_at = Column(DateTime, nullable=True, default=None)
+    claimed_by = Column(String(64), nullable=True, default=None)
+
     campaign_lead = relationship("CampaignLead", back_populates="queue_slots")
     inbox = relationship("Inbox")
     variant = relationship("SequenceVariant", foreign_keys=[variant_id])
@@ -596,8 +616,8 @@ class GmailMessage(Base):
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
-    inbox = relationship("Inbox")
-    thread = relationship("GmailThread", back_populates="messages")
+    inbox = relationship("Inbox", overlaps="messages")
+    thread = relationship("GmailThread", back_populates="messages", overlaps="inbox")
     attachments = relationship("GmailAttachment", back_populates="message", cascade="all, delete-orphan")
 
 
@@ -714,8 +734,8 @@ class Office365Message(Base):
     has_attachments = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
-    inbox = relationship("Inbox")
-    thread = relationship("Office365Thread", back_populates="messages")
+    inbox = relationship("Inbox", overlaps="messages")
+    thread = relationship("Office365Thread", back_populates="messages", overlaps="inbox")
 
 
 class Office365GraphSubscription(Base):
@@ -842,8 +862,8 @@ class SmtpMessage(Base):
     direction = Column(String(16), default="received", nullable=False)  # received | sent
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
-    inbox = relationship("Inbox")
-    thread = relationship("SmtpThread", back_populates="messages")
+    inbox = relationship("Inbox", overlaps="messages")
+    thread = relationship("SmtpThread", back_populates="messages", overlaps="inbox")
 
 
 class Webhook(Base):
@@ -1036,7 +1056,11 @@ class DirectEmail(Base):
     open_token = Column(String(32), unique=True, nullable=True, default=_make_open_token)
     opened = Column(Boolean, default=False, nullable=False)
     opened_at = Column(DateTime, nullable=True)
+    last_opened_at = Column(DateTime, nullable=True)
     open_count = Column(Integer, default=0, nullable=False)
+    open_history = Column(JSON, default=list, nullable=True)
+    click_count = Column(Integer, default=0, nullable=False)
+    click_history = Column(JSON, default=list, nullable=True)
     replied = Column(Boolean, default=False, nullable=False)
     replied_at = Column(DateTime, nullable=True)
     enable_follow_up = Column(Boolean, default=False, nullable=False)
@@ -1046,3 +1070,193 @@ class DirectEmail(Base):
     inbox = relationship("Inbox")
     lead = relationship("Lead")
     template = relationship("EmailTemplate")
+
+
+class DomainHealthScan(Base):
+    """Domain health, DNS authentication, and deliverability scan records."""
+    __tablename__ = "domain_health_scan"
+
+    id = Column(Integer, primary_key=True, index=True)
+    inbox_id = Column(Integer, ForeignKey("inbox.id", ondelete="CASCADE"), nullable=False, index=True)
+    domain = Column(String(255), nullable=False, index=True)
+    overall_status = Column(String(32), default="unknown", nullable=False)  # healthy | warning | critical | unknown
+
+    # SPF
+    spf_status = Column(String(32), default="unknown", nullable=False)  # healthy | warning | critical | not_configured
+    spf_record = Column(Text, nullable=True)
+    spf_details = Column(JSON, default=dict)
+
+    # DKIM
+    dkim_status = Column(String(32), default="unknown", nullable=False)  # healthy | warning | critical | not_configured
+    dkim_selector = Column(String(128), nullable=True)
+    dkim_record = Column(Text, nullable=True)
+    dkim_details = Column(JSON, default=dict)
+
+    # DMARC
+    dmarc_status = Column(String(32), default="unknown", nullable=False)  # healthy | warning | critical | not_configured
+    dmarc_policy = Column(String(32), nullable=True)  # none | quarantine | reject
+    dmarc_record = Column(Text, nullable=True)
+    dmarc_details = Column(JSON, default=dict)
+
+    # MX & Mail Server
+    mx_status = Column(String(32), default="unknown", nullable=False)  # healthy | warning | critical | not_configured
+    mx_records = Column(JSON, default=list)
+
+    # Blocklists / DNSBL
+    blocklist_status = Column(String(32), default="clean", nullable=False)  # clean | listed | warning | not_checked
+    blocklist_details = Column(JSON, default=dict)
+
+    # Google Postmaster / Sender Reputation
+    reputation_status = Column(String(32), default="not_available", nullable=False)  # healthy | warning | critical | not_available
+    reputation_details = Column(JSON, default=dict)
+
+    # Bounce & Delivery Performance Stats (from real EmailLog)
+    delivery_stats = Column(JSON, default=dict)
+
+    # Actionable issues & recommendations list
+    issues = Column(JSON, default=list)
+
+    scanned_at = Column(DateTime, default=_utcnow, nullable=False, index=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    inbox = relationship("Inbox", back_populates="health_scans")
+
+
+class EmailAttachment(Base):
+    """File attachment stored for inbound/outbound emails."""
+    __tablename__ = "email_attachment"
+
+    id = Column(Integer, primary_key=True, index=True)
+    inbox_id = Column(Integer, ForeignKey("inbox.id", ondelete="CASCADE"), nullable=False, index=True)
+    message_id = Column(String(512), nullable=False, index=True)
+    filename = Column(String(1024), nullable=True)
+    content_type = Column(String(255), nullable=True, default="application/octet-stream")
+    size_bytes = Column(Integer, nullable=True, default=0)
+    storage_type = Column(String(32), nullable=False, default="local")  # local | r2 | s3
+    storage_path = Column(String(1024), nullable=False)
+    content_id = Column(String(256), nullable=True)  # for inline images (cid:...)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    inbox = relationship("Inbox", back_populates="attachments")
+
+
+class EmailDraft(Base):
+    """Saved message drafts in Unibox."""
+    __tablename__ = "email_draft"
+
+    id = Column(Integer, primary_key=True, index=True)
+    inbox_id = Column(Integer, ForeignKey("inbox.id", ondelete="CASCADE"), nullable=False, index=True)
+    thread_id = Column(String(512), nullable=True, index=True)
+    to_email = Column(String(320), nullable=True)
+    subject = Column(String(998), nullable=True, default="")
+    body_html = Column(Text, nullable=True, default="")
+    body_plain = Column(Text, nullable=True, default="")
+    in_reply_to = Column(String(512), nullable=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    inbox = relationship("Inbox", back_populates="drafts")
+
+
+# ── Open-Source Prospect Research Engine Models ──────────────────────────────
+
+class ResearchJob(Base):
+    """Batched prospect discovery & research job."""
+    __tablename__ = "research_job"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    query_params = Column(JSON, default=dict)  # city, state, country, category, keywords, etc.
+    status = Column(String(32), default="pending", nullable=False)  # pending | running | completed | failed | cancelled
+    total_discovered = Column(Integer, default=0, nullable=False)
+    unique_companies = Column(Integer, default=0, nullable=False)
+    emails_found = Column(Integer, default=0, nullable=False)
+    verified_valid = Column(Integer, default=0, nullable=False)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+    companies = relationship("ResearchCompany", back_populates="job", cascade="all, delete-orphan")
+    activity_logs = relationship("ResearchActivityLog", back_populates="job", cascade="all, delete-orphan")
+
+
+class ResearchCompany(Base):
+    """Discovered business entity staged for research review."""
+    __tablename__ = "research_company"
+    __table_args__ = (
+        Index("ix_research_company_domain", "domain"),
+        Index("ix_research_company_job_review", "job_id", "review_status"),
+        Index("ix_research_company_icp_score", "icp_score"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("research_job.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    domain = Column(String(255), nullable=True)  # Normalized root domain (e.g. "theoryroad.com")
+    website = Column(String(512), nullable=True)
+    phone = Column(String(64), nullable=True)
+    address = Column(String(512), nullable=True)
+    city = Column(String(128), nullable=True)
+    state = Column(String(64), nullable=True)
+    country = Column(String(64), nullable=True)
+    category = Column(String(128), nullable=True)
+    description = Column(Text, nullable=True)
+    socials = Column(JSON, default=dict)  # {"linkedin": "...", "twitter": "...", "instagram": "..."}
+    source = Column(String(64), default="overture_maps", nullable=False)  # overture_maps | openstreetmap | web_crawl
+    source_id = Column(String(128), nullable=True)
+    icp_score = Column(Integer, default=0, nullable=False)
+    icp_reasons = Column(JSON, default=list)  # list of explainable score reasons
+    review_status = Column(String(32), default="pending", nullable=False)  # pending | approved | rejected
+    assigned_to = Column(String(128), nullable=True)
+    existing_lead_id = Column(Integer, ForeignKey("lead.id", ondelete="SET NULL"), nullable=True)
+    promoted_to_lead_id = Column(Integer, ForeignKey("lead.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    job = relationship("ResearchJob", back_populates="companies")
+    contacts = relationship("ResearchContact", back_populates="company", cascade="all, delete-orphan")
+    existing_lead = relationship("Lead", foreign_keys=[existing_lead_id])
+    promoted_lead = relationship("Lead", foreign_keys=[promoted_to_lead_id])
+
+
+class ResearchContact(Base):
+    """Contact associated with a researched business."""
+    __tablename__ = "research_contact"
+    __table_args__ = (
+        Index("ix_research_contact_company", "company_id"),
+        Index("ix_research_contact_email", "email"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("research_company.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(255), nullable=True)
+    first_name = Column(String(128), nullable=True)
+    last_name = Column(String(128), nullable=True)
+    role = Column(String(128), nullable=True)
+    email = Column(String(320), nullable=True)  # Nullable: never guessed or hallucinated
+    phone = Column(String(64), nullable=True)
+    linkedin_url = Column(String(512), nullable=True)
+    email_verification_status = Column(String(32), default="untested", nullable=False)  # valid | domain_validated | risky | invalid | catch_all | unknown | missing | untested
+    email_verification_details = Column(JSON, default=dict)
+    confidence_score = Column(Float, default=1.0, nullable=False)
+    field_provenance = Column(JSON, default=dict)  # {"email": {"source_url": "...", "snippet": "...", "extracted_at": "..."}}
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    company = relationship("ResearchCompany", back_populates="contacts")
+
+
+class ResearchActivityLog(Base):
+    """Audit activity log for research operations."""
+    __tablename__ = "research_activity_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("research_job.id", ondelete="CASCADE"), nullable=False, index=True)
+    company_id = Column(Integer, ForeignKey("research_company.id", ondelete="CASCADE"), nullable=True)
+    event_type = Column(String(64), nullable=False)  # discovered | crawled | verified | scored | approved | promoted | rejected
+    message = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    job = relationship("ResearchJob", back_populates="activity_logs")
+    company = relationship("ResearchCompany")
+
+

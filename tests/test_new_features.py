@@ -623,7 +623,7 @@ async def test_delete_campaign_removes_orphan_leads(session):
 
     from app.routers.campaigns import delete_campaign
 
-    await delete_campaign(campaign.id, db=session)
+    await delete_campaign(campaign.id, force=True, purge_leads=True, db=session)
 
     remaining = (await session.execute(select(Lead).where(Lead.id == lead.id))).scalar_one_or_none()
     assert remaining is None  # orphan lead removed

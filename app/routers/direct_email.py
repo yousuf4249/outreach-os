@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
@@ -60,6 +60,7 @@ class DirectEmailCreate(BaseModel):
     is_html: bool = True
     scheduled_at: Optional[datetime] = None
     enable_follow_up: bool = False
+    open_tracking: Optional[bool] = None
     track_opens: bool = True
 
 
@@ -78,6 +79,7 @@ class DirectEmailResponse(BaseModel):
     scheduled_at: Optional[str] = None
     sent_at: Optional[str] = None
     error_message: Optional[str] = None
+    warning: Optional[str] = None
     message_id: Optional[str] = None
     thread_id: Optional[str] = None
     opened: bool = False
@@ -88,11 +90,13 @@ class DirectEmailResponse(BaseModel):
     enable_follow_up: bool = False
     created_at: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
-def _to_response(de: DirectEmail, inbox_email: str = "") -> dict:
+def _to_response(de: DirectEmail, inbox_email: str = "", warning: Optional[str] = None) -> dict:
+    warn = warning
+    if not warn and de.status == "sent" and de.error_message:
+        warn = de.error_message
     return {
         "id": de.id,
         "inbox_id": de.inbox_id,
@@ -108,6 +112,7 @@ def _to_response(de: DirectEmail, inbox_email: str = "") -> dict:
         "scheduled_at": de.scheduled_at.isoformat() if de.scheduled_at else None,
         "sent_at": de.sent_at.isoformat() if de.sent_at else None,
         "error_message": de.error_message or None,
+        "warning": warn,
         "message_id": de.message_id or None,
         "thread_id": de.thread_id or None,
         "opened": bool(de.opened),
@@ -122,11 +127,46 @@ def _to_response(de: DirectEmail, inbox_email: str = "") -> dict:
 
 async def execute_send_direct_email(db: AsyncSession, direct_email: DirectEmail) -> bool:
     """Send one direct email immediately via the inbox's configured provider."""
+    # Check if this email was already sent (prevent duplicate sends)
+    if direct_email.status == "sent":
+        log.info("Direct email %s was already sent; skipping duplicate delivery", direct_email.id)
+        return True
+
+    # Check global monthly sending budget and reserve status atomically
+    from app.app_settings import (
+        get_claim_lock,
+        acquire_db_budget_lock,
+        check_and_reserve_monthly_budget,
+        get_monthly_sending_budget,
+    )
+    async with get_claim_lock():
+        await acquire_db_budget_lock(db)
+        budget = await get_monthly_sending_budget(db)
+        if budget > 0:
+            is_allowed, total_incurred, remaining = await check_and_reserve_monthly_budget(
+                db, additional_units=1, current_direct_id=direct_email.id
+            )
+            if not is_allowed:
+                direct_email.status = "failed"
+                direct_email.error_message = (
+                    f"Global monthly sending budget reached ({total_incurred}/{budget}). "
+                    "Please adjust your monthly sending budget in Settings -> Sending Settings."
+                )
+                direct_email.updated_at = utcnow()
+                await db.commit()
+                log.warning("Direct email %s blocked: monthly sending budget cap reached", direct_email.id)
+                return False
+
+        direct_email.status = "sending"
+        direct_email.updated_at = utcnow()
+        await db.commit()
+
     inbox_res = await db.execute(select(Inbox).where(Inbox.id == direct_email.inbox_id))
     inbox = inbox_res.scalar_one_or_none()
     if not inbox:
         direct_email.status = "failed"
         direct_email.error_message = f"Inbox with ID {direct_email.inbox_id} not found"
+        direct_email.updated_at = utcnow()
         await db.commit()
         return False
 
@@ -142,6 +182,7 @@ async def execute_send_direct_email(db: AsyncSession, direct_email: DirectEmail)
         if not smtp_account:
             direct_email.status = "failed"
             direct_email.error_message = "SMTP account credentials are not configured for this inbox"
+            direct_email.updated_at = utcnow()
             await db.commit()
             return False
     elif provider == "office365":
@@ -153,12 +194,14 @@ async def execute_send_direct_email(db: AsyncSession, direct_email: DirectEmail)
         if not o365_account:
             direct_email.status = "failed"
             direct_email.error_message = "Office 365 account is not connected for this inbox"
+            direct_email.updated_at = utcnow()
             await db.commit()
             return False
         o365_client_id, o365_client_secret, o365_tenant_id = await get_office365_oauth_credentials(db)
         if not _refresh_o365(o365_account, o365_client_id, o365_client_secret, o365_tenant_id):
             direct_email.status = "failed"
             direct_email.error_message = "Could not refresh Office 365 access token"
+            direct_email.updated_at = utcnow()
             await db.commit()
             return False
     else:
@@ -167,6 +210,7 @@ async def execute_send_direct_email(db: AsyncSession, direct_email: DirectEmail)
         if not gmail_account:
             direct_email.status = "failed"
             direct_email.error_message = "Gmail account is not connected for this inbox"
+            direct_email.updated_at = utcnow()
             await db.commit()
             return False
 
@@ -222,49 +266,117 @@ async def execute_send_direct_email(db: AsyncSession, direct_email: DirectEmail)
             else:
                 rendered_body += f"\n{pixel_img}"
 
-    # Perform send
+    # Perform network send
+    from app.sender import SendUncertain
+    send_result = None
+    stop_heartbeat = asyncio.Event()
+
+    async def _direct_heartbeat():
+        while not stop_heartbeat.is_set():
+            try:
+                await asyncio.wait_for(stop_heartbeat.wait(), timeout=30.0)
+                break
+            except asyncio.TimeoutError:
+                pass
+            try:
+                from app.database import AsyncSessionLocal
+                async with AsyncSessionLocal() as hb_session:
+                    await hb_session.execute(
+                        update(DirectEmail)
+                        .where(DirectEmail.id == direct_email.id, DirectEmail.status == "sending")
+                        .values(updated_at=utcnow())
+                    )
+                    await hb_session.commit()
+            except Exception:
+                pass
+
+    hb_task = asyncio.create_task(_direct_heartbeat())
     try:
-        send_result = await asyncio.to_thread(
-            send_email,
-            to_email=direct_email.to_email,
-            subject=rendered_subject,
-            body=rendered_body,
-            from_email=inbox.email,
-            from_name=inbox.display_name or "",
-            is_html=direct_email.is_html,
-            provider=provider,
-            gmail_account=gmail_account,
-            office365_account=o365_account,
-            office365_client_id=o365_client_id,
-            office365_client_secret=o365_client_secret,
-            office365_tenant_id=o365_tenant_id,
-            smtp_account=smtp_account,
-        )
-    except Exception as exc:
-        direct_email.status = "failed"
-        direct_email.error_message = str(exc)[:500]
+        try:
+            send_result = await asyncio.to_thread(
+                send_email,
+                to_email=direct_email.to_email,
+                subject=rendered_subject,
+                body=rendered_body,
+                from_email=inbox.email,
+                from_name=inbox.display_name or "",
+                is_html=direct_email.is_html,
+                provider=provider,
+                gmail_account=gmail_account,
+                office365_account=o365_account,
+                office365_client_id=o365_client_id,
+                office365_client_secret=o365_client_secret,
+                office365_tenant_id=o365_tenant_id,
+                smtp_account=smtp_account,
+            )
+        except Exception as exc:
+            direct_email.status = "failed"
+            direct_email.error_message = str(exc)[:500]
+            direct_email.updated_at = utcnow()
+            await db.commit()
+            log.warning("Direct send exception to %s: %s", direct_email.to_email, exc)
+            return False
+    finally:
+        stop_heartbeat.set()
+        await hb_task
+
+    if isinstance(send_result, SendUncertain):
+        direct_email.status = "uncertain"
+        direct_email.error_message = f"Ambiguous delivery outcome: {send_result.reason}"
+        direct_email.message_id = send_result.message_id
+        direct_email.thread_id = send_result.thread_id or send_result.message_id
+        direct_email.updated_at = utcnow()
         await db.commit()
-        log.warning("Direct send exception to %s: %s", direct_email.to_email, exc)
+        log.warning("Direct send uncertain to %s: %s", direct_email.to_email, send_result.reason)
         return False
 
     if not send_result or not isinstance(send_result, SendResult):
         err_msg = send_result.message if isinstance(send_result, SendFailure) else "Send failed"
         direct_email.status = "failed"
         direct_email.error_message = err_msg[:500]
+        direct_email.updated_at = utcnow()
         await db.commit()
         log.warning("Direct send rejected to %s: %s", direct_email.to_email, err_msg)
         return False
 
-    # Mark as sent
+    # Mark as sent immediately to persist Sent status and final rendered message
     now_dt = utcnow()
     direct_email.status = "sent"
     direct_email.sent_at = now_dt
+    direct_email.subject = rendered_subject
+    direct_email.body = rendered_body
     direct_email.message_id = send_result.message_id
     thread_id = send_result.thread_id or direct_email.thread_id or send_result.message_id
     direct_email.thread_id = thread_id
     direct_email.error_message = None
+    direct_email.updated_at = now_dt
 
-    # Mirror into conversation history
+    try:
+        await db.commit()
+    except Exception as exc:
+        log.warning("Initial commit for sent direct email %s raised %s. Re-attaching and committing...", direct_email.id, exc)
+        try:
+            await db.rollback()
+            await db.execute(
+                update(DirectEmail)
+                .where(DirectEmail.id == direct_email.id)
+                .values(
+                    status="sent",
+                    sent_at=now_dt,
+                    subject=rendered_subject,
+                    body=rendered_body,
+                    message_id=send_result.message_id,
+                    thread_id=thread_id,
+                    error_message=None,
+                    updated_at=now_dt,
+                )
+            )
+            await db.commit()
+        except Exception as retry_exc:
+            log.error("Could not persist sent status for direct email %s: %s", direct_email.id, retry_exc)
+
+    # Mirror into conversation history and unibox
+    post_send_error = None
     try:
         if provider == "smtp":
             await upsert_sent_smtp_message(
@@ -303,10 +415,27 @@ async def execute_send_direct_email(db: AsyncSession, direct_email: DirectEmail)
                 body=rendered_body,
                 is_html=direct_email.is_html,
             )
+        await db.commit()
     except Exception as exc:
         log.warning("Could not mirror sent direct email to unibox: %s", exc)
+        post_send_error = "Sent, but tracking or saving failed"
+        try:
+            await db.rollback()
+        except Exception:
+            pass
 
-    await db.commit()
+    if post_send_error:
+        try:
+            await db.execute(
+                update(DirectEmail)
+                .where(DirectEmail.id == direct_email.id)
+                .values(error_message=post_send_error, updated_at=utcnow())
+            )
+            await db.commit()
+            await db.refresh(direct_email)
+        except Exception as err:
+            log.warning("Could not persist post-send error on direct email: %s", err)
+            direct_email.error_message = post_send_error
 
     # Emit real-time unibox update
     try:
@@ -333,6 +462,22 @@ async def create_and_send_direct_email(
     _user=Depends(get_current_user),
 ):
     """Compose and send immediately or schedule an individual email."""
+    # Check global monthly sending budget if sending immediately
+    sched_dt_check = data.scheduled_at
+    if sched_dt_check is not None and getattr(sched_dt_check, 'tzinfo', None) is not None:
+        sched_dt_check = sched_dt_check.astimezone(timezone.utc).replace(tzinfo=None)
+    is_sched_check = sched_dt_check is not None and sched_dt_check > utcnow()
+    if not is_sched_check:
+        from app.app_settings import check_and_reserve_monthly_budget, get_monthly_sending_budget
+        budget = await get_monthly_sending_budget(db)
+        if budget > 0:
+            is_allowed, total_incurred, remaining = await check_and_reserve_monthly_budget(db, additional_units=1)
+            if not is_allowed:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Global monthly sending budget of {budget:,} emails reached ({total_incurred:,} consumed). Adjust your budget in Settings -> Sending Settings.",
+                )
+
     # Verify inbox exists
     inbox_res = await db.execute(select(Inbox).where(Inbox.id == data.inbox_id))
     inbox = inbox_res.scalar_one_or_none()
@@ -356,13 +501,46 @@ async def create_and_send_direct_email(
         sched_dt = sched_dt.astimezone(timezone.utc).replace(tzinfo=None)
     is_scheduled = sched_dt is not None and sched_dt > utcnow()
 
+    subject_clean = data.subject.strip()
+
+    # Prevent duplicate sends: Check if an identical email was sent or is sending within the last 2 minutes
+    if not is_scheduled:
+        two_mins_ago = utcnow() - timedelta(minutes=2)
+        dup_res = await db.execute(
+            select(DirectEmail)
+            .where(
+                DirectEmail.inbox_id == data.inbox_id,
+                func.lower(DirectEmail.to_email) == to_addr,
+                DirectEmail.subject == subject_clean,
+                DirectEmail.created_at >= two_mins_ago,
+            )
+            .order_by(DirectEmail.id.desc())
+        )
+        recent_emails = dup_res.scalars().all()
+        for existing in recent_emails:
+            if existing.status == "sent":
+                log.warning(
+                    "Duplicate direct send prevented: email to %s with subject '%s' was already sent at %s (id=%s, msg_id=%s)",
+                    to_addr, subject_clean, existing.sent_at, existing.id, existing.message_id,
+                )
+                return _to_response(
+                    existing,
+                    inbox.email,
+                    warning="Email has already been sent to this recipient. Duplicate send was prevented.",
+                )
+            elif existing.status == "sending":
+                raise HTTPException(
+                    status_code=409,
+                    detail="An identical email is currently being delivered to this recipient. Please wait a moment and verify Sent history before retrying.",
+                )
+
     direct_email = DirectEmail(
         inbox_id=data.inbox_id,
         to_email=to_addr,
         recipient_name=(data.recipient_name or "").strip(),
         lead_id=lead_id,
         template_id=data.template_id,
-        subject=data.subject.strip(),
+        subject=subject_clean,
         body=data.body,
         is_html=data.is_html,
         status="scheduled" if is_scheduled else "sending",
@@ -372,10 +550,10 @@ async def create_and_send_direct_email(
         updated_at=utcnow(),
     )
     db.add(direct_email)
-    await db.flush()
+    await db.commit()
+    await db.refresh(direct_email)
 
     if is_scheduled:
-        await db.commit()
         return _to_response(direct_email, inbox.email)
 
     # Send immediately
@@ -463,12 +641,15 @@ async def send_scheduled_now(
 
     if de.status == "sent":
         raise HTTPException(status_code=400, detail="Email has already been sent")
+    if de.status == "sending":
+        raise HTTPException(status_code=409, detail="An identical email is currently being delivered. Please wait a moment.")
 
     de.status = "sending"
     await db.commit()
+    await db.refresh(de)
 
     success = await execute_send_direct_email(db, de)
-    if not success:
+    if not success and de.status == "failed":
         raise HTTPException(status_code=502, detail=de.error_message or "Failed to deliver email")
 
     return _to_response(de, inbox_email)
@@ -490,6 +671,7 @@ async def run_direct_email_scheduler_job():
                 log.info("Sending due scheduled direct email id=%s to=%s", de.id, de.to_email)
                 de.status = "sending"
                 await db.commit()
+                await db.refresh(de)
                 await execute_send_direct_email(db, de)
     except Exception as exc:
         log.exception("Error in direct email scheduler job: %s", exc)

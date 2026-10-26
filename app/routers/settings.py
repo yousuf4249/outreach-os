@@ -1249,3 +1249,37 @@ async def test_custom_email_verification(
 
     return {"results": results}
 
+
+
+# ── Global Monthly Sending Budget ───────────────────────────────────────────
+from app.schemas import MonthlySendingBudgetResponse, MonthlySendingBudgetUpdate
+from app.app_settings import (
+    get_monthly_sending_stats,
+    set_monthly_sending_budget,
+    set_billing_cycle_start_day,
+)
+
+
+@router.get("/sending-budget", response_model=MonthlySendingBudgetResponse)
+async def get_sending_budget_endpoint(db: AsyncSession = Depends(get_db)):
+    """Return the centralized monthly sending budget, current usage, and billing period."""
+    stats = await get_monthly_sending_stats(db)
+    return stats
+
+
+@router.post("/sending-budget", response_model=MonthlySendingBudgetResponse)
+async def update_sending_budget_endpoint(
+    payload: MonthlySendingBudgetUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update the centralized monthly sending budget and optional billing cycle anchor day."""
+    if payload.monthly_budget < 0:
+        raise HTTPException(status_code=400, detail="Monthly budget cannot be negative")
+
+    await set_monthly_sending_budget(db, payload.monthly_budget)
+    if payload.billing_cycle_start_day is not None:
+        await set_billing_cycle_start_day(db, payload.billing_cycle_start_day)
+
+    await db.commit()
+    stats = await get_monthly_sending_stats(db)
+    return stats

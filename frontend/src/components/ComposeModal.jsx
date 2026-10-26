@@ -14,6 +14,7 @@ import {
   RiCheckLine,
   RiInformationLine,
   RiFlashlightLine,
+  RiAttachment2,
 } from 'react-icons/ri';
 
 const QUICK_VARIABLES = [
@@ -58,6 +59,7 @@ export default function ComposeModal({
   const [sending, setSending] = useState(false);
   const [previewTab, setPreviewTab] = useState(false); // false = edit, true = preview
   const [activeFocusField, setActiveFocusField] = useState('body'); // 'subject' or 'body'
+  const [attachments, setAttachments] = useState([]);
 
   const bodyInputRef = useRef(null);
   const subjectInputRef = useRef(null);
@@ -155,6 +157,7 @@ export default function ComposeModal({
 
   const handleSend = async (e) => {
     e.preventDefault();
+    if (sending) return;
 
     if (!selectedInboxId) {
       notify({ type: 'error', message: 'Please select a sending inbox account.' });
@@ -200,6 +203,7 @@ export default function ComposeModal({
         is_html: isHtml,
         scheduled_at: parsedScheduledAt,
         open_tracking: openTracking,
+        track_opens: openTracking,
         enable_follow_up: enableFollowUp,
       };
 
@@ -207,6 +211,10 @@ export default function ComposeModal({
 
       if (sendMode === 'scheduled') {
         notify({ type: 'success', message: 'Email scheduled successfully!' });
+      } else if (res?.error_message?.includes('tracking or saving failed') || res?.warning?.includes('tracking or saving failed')) {
+        notify({ type: 'warning', message: 'Sent, but tracking or saving failed. Check sent history.' });
+      } else if (res?.warning) {
+        notify({ type: 'info', message: res.warning });
       } else {
         notify({ type: 'success', message: 'Direct email sent successfully!' });
       }
@@ -216,7 +224,20 @@ export default function ComposeModal({
       }
       onClose();
     } catch (err) {
-      notify({ type: 'error', message: err.message || 'Failed to send direct email.' });
+      const errMsg = err.message || '';
+      if (errMsg.toLowerCase().includes('already sent') || errMsg.toLowerCase().includes('duplicate')) {
+        notify({ type: 'warning', message: 'Email already sent to this recipient. Duplicate send prevented.' });
+        if (onSent) onSent();
+        onClose();
+      } else if (errMsg.includes('tracking or saving failed')) {
+        notify({ type: 'warning', message: 'Sent, but tracking or saving failed. Check sent history.' });
+        if (onSent) onSent();
+        onClose();
+      } else if (errMsg.includes('currently being delivered')) {
+        notify({ type: 'warning', message: errMsg });
+      } else {
+        notify({ type: 'error', message: errMsg || 'Failed to send direct email.' });
+      }
     } finally {
       setSending(false);
     }
@@ -466,6 +487,43 @@ export default function ComposeModal({
                 </div>
               </div>
             )}
+
+            {/* File Attachments Selector */}
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700/50 cursor-pointer text-xs font-medium transition-colors shadow-2xs">
+                <RiAttachment2 size={14} className="text-teal-600 dark:text-teal-400" />
+                <span>Attach Files</span>
+                <input
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    if (e.target.files) {
+                      setAttachments((prev) => [...prev, ...Array.from(e.target.files)]);
+                    }
+                  }}
+                />
+              </label>
+
+              {attachments.map((file, idx) => (
+                <div
+                  key={idx}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg bg-teal-50 dark:bg-teal-950/40 text-teal-800 dark:text-teal-200 border border-teal-200 dark:border-teal-800"
+                >
+                  <span className="truncate max-w-[140px] font-medium">{file.name}</span>
+                  <span className="text-[10px] text-teal-600 dark:text-teal-400 font-mono">
+                    ({Math.max(1, Math.round(file.size / 1024))} KB)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
+                    className="text-teal-600 hover:text-teal-800 dark:hover:text-teal-300 ml-1 font-bold p-0.5"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
 
           {/* Delivery & Automation Controls */}

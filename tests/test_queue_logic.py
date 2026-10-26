@@ -1332,7 +1332,7 @@ class TestApiRecalculationTriggers:
         # ensure lead exists before deletion
         res1 = await session.execute(select(Lead).where(Lead.id == lead.id))
         assert res1.scalar_one_or_none() is not None
-        await delete_campaign(campaign.id, db=session)
+        await delete_campaign(campaign.id, force=True, purge_leads=True, db=session)
         # lead should have been cleaned up too
         res2 = await session.execute(select(Lead).where(Lead.id == lead.id))
         assert res2.scalar_one_or_none() is None
@@ -1343,7 +1343,7 @@ class TestApiRecalculationTriggers:
         lead = await make_lead(session)
         await make_campaign_lead(session, camp1.id, lead.id)
         await make_campaign_lead(session, camp2.id, lead.id)
-        await delete_campaign(camp1.id, db=session)
+        await delete_campaign(camp1.id, force=True, purge_leads=True, db=session)
         # lead still exists because it's tied to camp2
         res3 = await session.execute(select(Lead).where(Lead.id == lead.id))
         assert res3.scalar_one_or_none() is not None
@@ -1527,7 +1527,7 @@ class TestApiRecalculationTriggers:
         count = await session.execute(select(func.count(EmailClick.id)))
         assert count.scalar() == 1
         # calling the router directly mimics the API path seen in the error
-        await delete_campaign(campaign.id, db=session)
+        await delete_campaign(campaign.id, force=True, purge_leads=True, db=session)
         # once the campaign (and therefore log) is removed, clicks should
         # have been deleted as well rather than nulled out
         count2 = await session.execute(select(func.count(EmailClick.id)))
@@ -1543,7 +1543,7 @@ class TestApiRecalculationTriggers:
         count = await session.execute(select(func.count(LeadUnsubscribeToken.id)))
         assert count.scalar() == 1
         # use the router path to trigger the same logic as the API
-        await delete_campaign(campaign.id, db=session)
+        await delete_campaign(campaign.id, force=True, purge_leads=True, db=session)
         count2 = await session.execute(select(func.count(LeadUnsubscribeToken.id)))
         assert count2.scalar() == 0
 

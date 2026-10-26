@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, exists, update as sa_update
 
 from app.database import get_db
-from app.models import Inbox, CampaignInbox, QueueSlot, EmailLog, CampaignLead
+from app.models import Inbox, CampaignInbox, QueueSlot, EmailLog, CampaignLead, Campaign
 from app.schemas import (
     BeaconConnectFromInboxRequest,
     BeaconConnectRequest,
@@ -233,6 +233,8 @@ async def create_inbox(data: InboxCreate, db: AsyncSession = Depends(get_db)):
         wait_minutes_between=data.wait_minutes_between,
         max_jitter_seconds=data.max_jitter_seconds,
         provider=data.provider,
+        inbound_type=data.inbound_type or "imap",
+        outbound_provider=data.outbound_provider or "smtp",
         tracking_domain=td or None,
         ramp_up_enabled=data.ramp_up_enabled,
         ramp_up_period_days=data.ramp_up_period_days,
@@ -323,6 +325,10 @@ async def update_inbox(
         capacity_changed = True
     if data.provider is not None:
         inbox.provider = data.provider
+    if data.inbound_type is not None:
+        inbox.inbound_type = data.inbound_type
+    if data.outbound_provider is not None:
+        inbox.outbound_provider = data.outbound_provider
     if data.tracking_domain is not None:
         inbox.tracking_domain = _normalise_tracking_domain(data.tracking_domain) or None
     if data.ramp_up_enabled is not None:
@@ -614,6 +620,31 @@ async def delete_inbox(inbox_id: int, db: AsyncSession = Depends(get_db)):
     inbox = result.scalar_one_or_none()
     if not inbox:
         raise HTTPException(404, "Inbox not found")
+
+    # Prevent deleting an inbox associated with an active campaign
+    active_camps = (
+        await db.execute(
+            select(Campaign)
+            .join(CampaignInbox, CampaignInbox.campaign_id == Campaign.id)
+            .where(
+                CampaignInbox.inbox_id == inbox_id,
+                Campaign.paused.is_(False),
+            )
+        )
+    ).scalars().all()
+
+    if active_camps:
+        camp_names = ", ".join(f"'{c.name}' (ID: {c.id})" for c in active_camps)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete inbox '{inbox.email}' because it is assigned to active campaign(s): {camp_names}. Please pause or remove the inbox from these campaigns before deleting.",
+        )
+
+    # Delete any lingering queue slots for this inbox
+    await db.execute(
+        QueueSlot.__table__.delete().where(QueueSlot.inbox_id == inbox_id)
+    )
+
     # Remove campaign assignments referencing this inbox
     await db.execute(
         CampaignInbox.__table__.delete().where(CampaignInbox.inbox_id == inbox_id)

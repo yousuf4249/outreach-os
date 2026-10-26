@@ -8,6 +8,20 @@ import { FileUploadArea } from '../components/ui/FileUploadArea';
 import { Card } from '../components/ui/Card';
 import EmailContent from '../components/EmailContent';
 import DatePicker from '../components/ui/DatePicker';
+import SelectProspectsModal from '../components/SelectProspectsModal';
+import {
+  RiFolderUserLine,
+  RiCheckboxCircleLine,
+  RiCloseCircleLine,
+  RiDeleteBinLine,
+  RiStopCircleLine,
+  RiPlayCircleLine,
+  RiPauseCircleLine,
+  RiRestartLine,
+  RiAlertLine,
+  RiInformationLine,
+  RiCheckDoubleLine,
+} from 'react-icons/ri';
 import { useConfirm } from '../context/ConfirmContext';
 import { useAppMode } from '../context/AppModeContext';
 import {
@@ -297,6 +311,8 @@ export default function CampaignDetail() {
         <LeadsTab
           leads={leads}
           campaignId={id}
+          campaignName={campaign?.name}
+          isCampaignPaused={Boolean(campaign?.paused)}
           refresh={loadAll}
           onViewQueue={email => {
             setQueueFilter(email);
@@ -355,8 +371,11 @@ const BADGE_STYLES = {
   active:         'bg-emerald-100 text-emerald-700',
   contacted:      'bg-teal-100 text-teal-800',
   completed:      'bg-blue-100 text-blue-700',
+  stopped:        'bg-slate-200 text-slate-700',
   unsubscribed:   'bg-gray-200 text-gray-600',
   bounced:        'bg-red-100 text-red-700',
+  hard_bounce:    'bg-red-100 text-red-700',
+  temporary_failure: 'bg-amber-100 text-amber-800',
   wrong_person:   'bg-purple-100 text-purple-700',
   replied:        'bg-violet-100 text-violet-700',
   opened:         'bg-amber-100 text-amber-700',
@@ -368,6 +387,8 @@ const BADGE_STYLES = {
   paused:         'bg-yellow-100 text-yellow-700',
   // Email verification statuses
   valid:          'bg-emerald-100 text-emerald-700',
+  domain_validated: 'bg-sky-100 text-sky-700',
+  not_verified:   'bg-gray-100 text-gray-500',
   invalid:        'bg-red-100 text-red-700',
   risky:          'bg-orange-100 text-orange-700',
   catch_all:      'bg-yellow-100 text-yellow-700',
@@ -401,9 +422,10 @@ function deriveStatuses(lead) {
 }
 
 // ─── Leads Tab ────────────────────────────────────────────────────────────────
-function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
+function LeadsTab({ leads, campaignId, campaignName, isCampaignPaused, refresh, onViewQueue }) {
   const notify  = useNotify();
   const confirm = useConfirm();
+  const [selectProspectsOpen, setSelectProspectsOpen] = useState(false);
   const [mode, setMode]   = useState('single');
   const [single, setSingle] = useState({ email: '', name: '', custom: '' });
   const [bulk, setBulk]   = useState('');
@@ -454,6 +476,7 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
         if (filters.status === 'bounced' && l.status !== 'bounced') return false;
         if (filters.status === 'unsubscribed' && l.status !== 'unsubscribed') return false;
         if (filters.status === 'wrong_person' && l.status !== 'wrong_person') return false;
+        if (filters.status === 'stopped' && l.status !== 'stopped') return false;
         if (filters.status === 'completed' && l.status !== 'completed') return false;
         if (filters.status === 'needs_custom_email' && l.status !== 'needs_custom_email') return false;
       }
@@ -476,6 +499,75 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
       return true;
     });
   }, [leads, filters]);
+
+  // Pagination & Bulk Selection state
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [selectAllFiltered, setSelectAllFiltered] = useState(false);
+  const [showBulkRemoveConfirm, setShowBulkRemoveConfirm] = useState(false);
+  const [bulkActionLoading, setBulkActionLoading] = useState(false);
+
+  // Reset page when filters change
+  useEffect(() => {
+    setPage(1);
+  }, [filters]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredLeads.length / pageSize));
+  const paginatedLeads = useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return filteredLeads.slice(start, start + pageSize);
+  }, [filteredLeads, page, pageSize]);
+
+  const currentPageIds = useMemo(() => paginatedLeads.map((l) => l.lead_id), [paginatedLeads]);
+  const allFilteredIds = useMemo(() => filteredLeads.map((l) => l.lead_id), [filteredLeads]);
+
+  const isAllPageSelected = currentPageIds.length > 0 && currentPageIds.every((id) => selectedIds.has(id));
+  const isSomePageSelected = currentPageIds.some((id) => selectedIds.has(id));
+
+  const toggleSelectOne = (leadId) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(leadId)) {
+        next.delete(leadId);
+        setSelectAllFiltered(false);
+      } else {
+        next.add(leadId);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectPage = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (isAllPageSelected) {
+        currentPageIds.forEach((id) => next.delete(id));
+        setSelectAllFiltered(false);
+      } else {
+        currentPageIds.forEach((id) => next.add(id));
+      }
+      return next;
+    });
+  };
+
+  const handleSelectAllFiltered = () => {
+    setSelectedIds(new Set(allFilteredIds));
+    setSelectAllFiltered(true);
+  };
+
+  const clearSelection = () => {
+    setSelectedIds(new Set());
+    setSelectAllFiltered(false);
+  };
+
+  const selectedLeadsList = useMemo(() => {
+    return leads.filter((l) => selectedIds.has(l.lead_id));
+  }, [leads, selectedIds]);
+
+  const selectedHasTemporaryBounces = useMemo(() => {
+    return selectedLeadsList.some((l) => l.status === 'bounced' && l.bounce_type === 'temporary_failure');
+  }, [selectedLeadsList]);
 
   // Load verification summary
   const loadVerificationSummary = useCallback(async () => {
@@ -588,14 +680,112 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
   };
 
   const removeLead = async (lid, email) => {
-    const ok = await confirm(`Remove ${email} from this campaign?`);
+    const ok = await confirm(`Remove ${email} from this campaign?\n\n(Prospect contact data and email logs will remain safely preserved in your central Prospects database.)`);
     if (!ok) return;
     try {
       await api.del(`/campaigns/${campaignId}/leads/${lid}`);
-      notify({ type: 'success', message: 'Lead removed' });
+      notify({ type: 'success', message: 'Lead removed from campaign' });
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(lid);
+        return next;
+      });
       refresh();
     } catch (e) {
       notify({ type: 'error', message: e.message });
+    }
+  };
+
+  const handleExecuteBulkRemove = async () => {
+    if (!selectedIds.size) return;
+    setBulkActionLoading(true);
+    try {
+      const res = await api.post(`/campaigns/${campaignId}/leads/bulk-remove`, {
+        lead_ids: Array.from(selectedIds),
+      });
+      notify({
+        type: 'success',
+        message: `Removed ${res.removed ?? selectedIds.size} lead(s) from campaign. Prospect records remain safely preserved in the database.`,
+      });
+      clearSelection();
+      setShowBulkRemoveConfirm(false);
+      refresh();
+    } catch (err) {
+      notify({ type: 'error', message: err.message || 'Failed to remove leads' });
+    } finally {
+      setBulkActionLoading(false);
+    }
+  };
+
+  const handleBulkAction = async (action) => {
+    if (!selectedIds.size) return;
+    setBulkActionLoading(true);
+    try {
+      const res = await api.post(`/campaigns/${campaignId}/leads/bulk-action`, {
+        lead_ids: Array.from(selectedIds),
+        action,
+      });
+      const actionName = action === 'stop' ? 'Stopped' : action === 'resume' ? 'Resumed' : 'Paused';
+      notify({
+        type: 'success',
+        message: `${actionName} sequence for ${res.updated ?? selectedIds.size} lead(s).`,
+      });
+      clearSelection();
+      refresh();
+    } catch (err) {
+      notify({ type: 'error', message: err.message || `Failed to ${action} leads` });
+    } finally {
+      setBulkActionLoading(false);
+    }
+  };
+
+  const handleBulkRetry = async () => {
+    if (!selectedIds.size) return;
+    setBulkActionLoading(true);
+    try {
+      const res = await api.post(`/campaigns/${campaignId}/leads/bulk-retry`, {
+        lead_ids: Array.from(selectedIds),
+      });
+      notify({
+        type: 'success',
+        message: res.message || `Recovered ${res.recovered} lead(s).`,
+      });
+      clearSelection();
+      refresh();
+    } catch (err) {
+      notify({ type: 'error', message: err.message || 'Failed to retry leads' });
+    } finally {
+      setBulkActionLoading(false);
+    }
+  };
+
+  const stopSequenceForLead = async (leadId) => {
+    try {
+      await api.patch(`/campaigns/${campaignId}/leads/${leadId}`, { status: 'stopped', sending_paused: true });
+      notify({ type: 'success', message: 'Sequence stopped. Follow-ups cancelled.' });
+      refresh();
+    } catch (err) {
+      notify({ type: 'error', message: err.message || 'Failed to stop sequence' });
+    }
+  };
+
+  const resumeSequenceForLead = async (leadId) => {
+    try {
+      await api.patch(`/campaigns/${campaignId}/leads/${leadId}`, { status: 'active', sending_paused: false });
+      notify({ type: 'success', message: 'Sequence resumed. Next steps scheduled.' });
+      refresh();
+    } catch (err) {
+      notify({ type: 'error', message: err.message || 'Failed to resume sequence' });
+    }
+  };
+
+  const retryLeadSend = async (leadId) => {
+    try {
+      const res = await api.post(`/campaigns/${campaignId}/leads/${leadId}/retry`);
+      notify({ type: 'success', message: res.message || 'Lead recovered and re-queued' });
+      refresh();
+    } catch (err) {
+      notify({ type: 'error', message: err.message || 'Cannot retry this lead' });
     }
   };
 
@@ -756,6 +946,15 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
     <div className="space-y-6 min-w-0 max-w-full">
       {/* Import / Export toolbar */}
       <div className="flex flex-wrap items-center gap-3">
+        <Button
+          size="sm"
+          variant="default"
+          className="bg-teal-600 hover:bg-teal-700 text-white font-medium shadow-sm flex items-center gap-1.5"
+          onClick={() => setSelectProspectsOpen(true)}
+        >
+          <RiFolderUserLine className="w-4 h-4" />
+          Select Existing Prospects
+        </Button>
         <Button size="sm" variant="outline" onClick={handleExport} disabled={!leads.length}>
           <svg className="w-4 h-4 mr-1.5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V3" /></svg>
           Export{hasActiveFilter ? ' (filtered)' : ''} CSV
@@ -810,115 +1009,12 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
         </div>
       )}
 
-      {/* Add leads */}
-      <div className="bg-white rounded-lg border border-gray-200 p-5">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="font-semibold text-gray-800">Add leads</h3>
-          <button
-            className="text-gray-400 hover:text-teal-600 transition-colors"
-            onClick={() => setShowFormatInfo(v => !v)}
-            title="Accepted data formats"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-          </button>
-        </div>
-
-        {showFormatInfo && (
-          <div className="mb-4 p-3 bg-teal-50 border border-teal-200 rounded-lg text-sm text-teal-800 space-y-2">
-            <p className="font-semibold">Accepted formats for bulk paste:</p>
-            <ul className="list-disc pl-5 space-y-1 text-xs">
-              <li><strong>Emails only</strong> — one per line or comma-separated<br/><code className="bg-teal-100 px-1 rounded">john@a.com, jane@b.com</code></li>
-              <li><strong>Tab-separated (Excel / Sheets copy-paste)</strong> — first row = headers<br/><code className="bg-teal-100 px-1 rounded">email&nbsp;&nbsp;&nbsp;name&nbsp;&nbsp;&nbsp;company</code><br/><code className="bg-teal-100 px-1 rounded">john@a.com&nbsp;&nbsp;&nbsp;John&nbsp;&nbsp;&nbsp;Acme</code></li>
-              <li><strong>Comma-separated with headers</strong><br/><code className="bg-teal-100 px-1 rounded">email,name,company</code><br/><code className="bg-teal-100 px-1 rounded">john@a.com,John,Acme</code></li>
-            </ul>
-            <p className="text-xs text-teal-600 mt-1">Columns beyond <em>email</em> and <em>name</em> are saved as custom fields.</p>
-            <p className="font-semibold mt-2">CSV file import:</p>
-            <p className="text-xs">Upload a <code className="bg-teal-100 px-1 rounded">.csv</code> or <code className="bg-teal-100 px-1 rounded">.tsv</code> file with an <em>email</em> header column. Extra columns become custom fields.</p>
-          </div>
-        )}
-
-        <div className="flex gap-2 mb-3">
-          <Button size="sm" variant={mode==='single'?'default':'outline'} onClick={()=>setMode('single')}>Single</Button>
-          <Button size="sm" variant={mode==='bulk'?'default':'outline'}   onClick={()=>setMode('bulk')}>Bulk paste</Button>
-        </div>
-        <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none mb-2">
-          <input
-            type="checkbox"
-            checked={skipDuplicates}
-            onChange={e => { setSkipDuplicates(e.target.checked); setLastDuplicates([]); }}
-            className="rounded"
-          />
-          Skip duplicates (checks all campaigns)
-        </label>
-        {emailVerifEnabled && (
-          <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none mb-4">
-            <input
-              type="checkbox"
-              checked={verifyEmails}
-              onChange={e => setVerifyEmails(e.target.checked)}
-              className="rounded"
-            />
-            Verify emails after adding
-          </label>
-        )}
-        {msg && <div className={`mb-2 text-sm ${msg.type==='error'?'text-red-600':'text-green-600'}`}>{msg.text}</div>}
-        {mode === 'single' && (
-          <form onSubmit={addSingle} className="space-y-3">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm text-gray-600 mb-1">Email *</label>
-                <input
-                  type="email" required
-                  className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                  value={single.email}
-                  onChange={e => setSingle(s=>({...s, email: e.target.value}))}
-                />
-              </div>
-              <div>
-                <label className="block text-sm text-gray-600 mb-1">Name</label>
-                <input
-                  className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                  value={single.name}
-                  onChange={e => setSingle(s=>({...s, name: e.target.value}))}
-                />
-              </div>
-            </div>
-            <div>
-              <label className="block text-sm text-gray-600 mb-1">Custom data (JSON)</label>
-              <textarea
-                rows={2}
-                className="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
-                placeholder='{"company": "Acme", "title": "CEO"}'
-                value={single.custom}
-                onChange={e => setSingle(s=>({...s, custom: e.target.value}))}
-              />
-            </div>
-            <Button size="sm" variant="default">Add lead</Button>
-          </form>
-        )}
-        {mode === 'bulk' && (
-          <form onSubmit={addBulk} className="space-y-3">
-            <div>
-              <label className="block text-sm text-gray-600 mb-1">Paste leads — emails, CSV rows, or Excel copy-paste (see ⓘ above)</label>
-              <textarea
-                rows={6}
-                className="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
-                placeholder={"email,name,company\njohn@acme.com,John Doe,Acme Inc\njane@co.io,Jane Smith,Co"}
-                value={bulk}
-                onChange={e => setBulk(e.target.value)}
-              />
-            </div>
-            <Button size="sm" variant="default">Add leads</Button>
-          </form>
-        )}
-      </div>
-
       {/* Filter bar */}
       <div className="flex flex-wrap gap-x-6 gap-y-2 p-3 bg-gray-50 dark:bg-gray-800/40 rounded-lg border border-gray-200 dark:border-gray-700 text-xs">
         {/* Status */}
         <div className="flex items-center gap-1.5">
           <span className="font-medium text-gray-500 whitespace-nowrap">Status:</span>
-          {[{v:'all',l:'All'},{v:'active',l:'Active'},{v:'contacted',l:'Contacted'},{v:'completed',l:'Completed'},{v:'bounced',l:'Bounced'},{v:'unsubscribed',l:'Unsub'},{v:'wrong_person',l:'Wrong person'},{v:'needs_custom_email',l:'Needs custom'}].map(o => (
+          {[{v:'all',l:'All'},{v:'active',l:'Active'},{v:'contacted',l:'Contacted'},{v:'completed',l:'Completed'},{v:'stopped',l:'Stopped'},{v:'bounced',l:'Bounced'},{v:'unsubscribed',l:'Unsub'},{v:'wrong_person',l:'Wrong person'},{v:'needs_custom_email',l:'Needs custom'}].map(o => (
             <button key={o.v} onClick={() => setFilter('status', o.v)}
               className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
                 filters.status === o.v ? 'bg-teal-500 text-white' : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-600 hover:border-teal-300'
@@ -980,31 +1076,149 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
               }`}>{o.l}</button>
           ))}
         </div>
-        {/* Email verification */}
+        {/* Email verification summary & Gate actions */}
         {verificationSummary?.statuses && (
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="font-medium text-gray-500 whitespace-nowrap">Verified:</span>
-            {[
-              { v: 'all', l: 'All' },
-              { v: 'valid', l: 'Valid' },
-              { v: 'invalid', l: 'Invalid' },
-              { v: 'risky', l: 'Risky' },
-              { v: 'catch_all', l: 'Catch-All' },
-              { v: 'unknown', l: 'Unknown' },
-              { v: 'pending', l: 'Pending' },
-              { v: 'unverified', l: 'Unverified' },
-            ].filter(o => o.v === 'all' || (verificationSummary.statuses[o.v] || 0) > 0).map(o => (
-              <button key={o.v} onClick={() => setFilter('verification', o.v)}
-                className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
-                  filters.verification === o.v ? 'bg-teal-500 text-white' : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-600 hover:border-teal-300'
-                }`}>
-                {o.l}{o.v !== 'all' ? ` (${verificationSummary.statuses[o.v] || 0})` : ''}
+          <div className="flex items-center justify-between flex-wrap gap-2 pt-2 border-t border-gray-100">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="font-medium text-gray-500 whitespace-nowrap">Deliverability:</span>
+              {[
+                { v: 'all', l: 'All' },
+                { v: 'valid', l: 'Valid' },
+                { v: 'domain_validated', l: 'Domain Validated' },
+                { v: 'invalid', l: 'Invalid (Blocked)' },
+                { v: 'risky', l: 'Risky' },
+                { v: 'catch_all', l: 'Catch-All' },
+                { v: 'unknown', l: 'Unknown' },
+                { v: 'pending', l: 'Pending' },
+                { v: 'unverified', l: 'Unverified' },
+              ].filter(o => o.v === 'all' || (verificationSummary.statuses[o.v] || 0) > 0).map(o => (
+                <button key={o.v} onClick={() => setFilter('verification', o.v)}
+                  className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
+                    filters.verification === o.v ? 'bg-teal-500 text-white' : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-600 hover:border-teal-300'
+                  }`}>
+                  {o.l}{o.v !== 'all' ? ` (${verificationSummary.statuses[o.v] || 0})` : ''}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const res = await api.post(`/campaigns/${campaignId}/leads/approve-all-review`);
+                    notify({ type: 'success', message: `Approved ${res.approved_count} review-needed contacts for sending.` });
+                    loadVerificationSummary();
+                    refresh();
+                  } catch (e) {
+                    notify({ type: 'error', message: e.message || 'Approval failed' });
+                  }
+                }}
+                className="px-2.5 py-1 text-xs font-semibold rounded-md bg-teal-50 text-teal-700 border border-teal-200 hover:bg-teal-100 transition-colors shadow-2xs"
+                title="Approves unknown, catch-all, and unverified contacts in this campaign to bypass the review gate"
+              >
+                Approve Review Contacts
               </button>
-            ))}
+            </div>
           </div>
         )}
       </div>
 
+
+      {/* Bulk Action Toolbar */}
+      {selectedIds.size > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800 rounded-lg text-sm text-teal-900 dark:text-teal-200 shadow-xs animate-in fade-in">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold px-2 py-0.5 rounded-full bg-teal-600 text-white text-xs">
+              {selectedIds.size}
+            </span>
+            <span className="font-medium text-teal-800 dark:text-teal-300">
+              lead{selectedIds.size !== 1 ? 's' : ''} selected
+            </span>
+            {isAllPageSelected && filteredLeads.length > paginatedLeads.length && !selectAllFiltered && (
+              <button
+                type="button"
+                onClick={handleSelectAllFiltered}
+                className="ml-2 text-xs font-semibold text-teal-700 dark:text-teal-400 hover:underline"
+              >
+                Select all {filteredLeads.length} leads matching filters
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <Button
+              size="xs"
+              variant="outline"
+              className="text-amber-700 dark:text-amber-400 border-amber-300 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+              disabled={bulkActionLoading}
+              onClick={() => handleBulkAction('stop')}
+              title="Stop sequence and cancel all future emails for selected leads"
+            >
+              <RiStopCircleLine className="w-3.5 h-3.5 mr-1" />
+              Stop Sequence
+            </Button>
+            <Button
+              size="xs"
+              variant="outline"
+              className="text-emerald-700 dark:text-emerald-400 border-emerald-300 dark:border-emerald-700 hover:bg-emerald-100 dark:hover:bg-emerald-900/40"
+              disabled={bulkActionLoading}
+              onClick={() => handleBulkAction('resume')}
+              title="Resume sequence and schedule next emails"
+            >
+              <RiPlayCircleLine className="w-3.5 h-3.5 mr-1" />
+              Resume Sequence
+            </Button>
+            {selectedHasTemporaryBounces && (
+              <Button
+                size="xs"
+                variant="outline"
+                className="text-blue-700 dark:text-blue-400 border-blue-300 dark:border-blue-700 hover:bg-blue-100 dark:hover:bg-blue-900/40"
+                disabled={bulkActionLoading}
+                onClick={handleBulkRetry}
+                title="Retry eligible temporary provider errors"
+              >
+                <RiRestartLine className="w-3.5 h-3.5 mr-1" />
+                Retry Temporary Bounces
+              </Button>
+            )}
+            <Button
+              size="xs"
+              variant="danger"
+              className="bg-red-600 hover:bg-red-700 text-white"
+              disabled={bulkActionLoading}
+              onClick={() => setShowBulkRemoveConfirm(true)}
+              title="Remove selected leads from this campaign (preserves central prospect database)"
+            >
+              <RiDeleteBinLine className="w-3.5 h-3.5 mr-1" />
+              Remove From Campaign ({selectedIds.size})
+            </Button>
+            <button
+              type="button"
+              onClick={clearSelection}
+              className="text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 underline px-1.5 py-1"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Selection Matching Banner */}
+      {selectedIds.size > 0 && isAllPageSelected && filteredLeads.length > paginatedLeads.length && !selectAllFiltered && (
+        <div className="flex items-center justify-between p-2.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg text-xs text-amber-800 dark:text-amber-300">
+          <div>
+            All <strong className="font-semibold">{paginatedLeads.length}</strong> leads on this page are selected.
+          </div>
+          <button
+            type="button"
+            onClick={handleSelectAllFiltered}
+            className="font-bold underline text-amber-900 dark:text-amber-200 hover:text-amber-950"
+          >
+            Select all {filteredLeads.length} leads matching current filters
+          </button>
+        </div>
+      )}
 
       {/* Leads table */}
       {filteredLeads.length === 0 ? (
@@ -1014,163 +1228,391 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
             : 'No leads match the current filter.'}
         </div>
       ) : (
-        <div className="w-full max-w-full min-w-0 overflow-x-auto rounded-lg border border-gray-200 shadow-sm">
-          <table className="min-w-max w-full text-sm bg-white">
-            <thead>
-              <tr className="bg-gray-50 border-b border-gray-200">
-                <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Email</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-600">Name</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-600">Status</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-600">Stage</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Inbox</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Provider</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Enrolled</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Sending</th>
-                {customFields.map(f => (
-                  <th key={f} className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap capitalize">{f}</th>
-                ))}
-                <th className="px-4 py-3 w-16"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredLeads.map(l => (
-                <tr key={l.lead_id} className="border-b border-gray-100 hover:bg-gray-50/60 transition-colors">
-                  {/* email */}
-                  <td className="px-4 py-2.5">
-                    <button
-                      className="font-mono text-teal-600 hover:underline text-left"
-                      onClick={() => onViewQueue?.(l.email)}
-                      title="View queue for this lead"
-                    >
-                      {l.email}
-                    </button>
-                  </td>
-                  {/* name */}
-                  <td className="px-4 py-2.5 text-gray-700">{l.name || <span className="text-gray-300">—</span>}</td>
-                  {/* status badges */}
-                  <td className="px-4 py-2.5">
-                    <div className="flex flex-wrap gap-1">
-                      {deriveStatuses(l).map(s => <StatusBadge key={s} label={s} />)}
-                    </div>
-                  </td>
-                  {/* stage */}
-                  <td className="px-4 py-2.5 text-gray-600 whitespace-nowrap">{l.stage || '—'}</td>
-                  {/* inbox that last sent or will send next */}
-                  <td className="px-4 py-2.5 whitespace-nowrap">
-                    {l.from_inbox_email ? (
-                      <span className="font-mono text-xs text-gray-700" title="Last sent from this inbox, or next scheduled sender if none sent yet">
-                        {l.from_inbox_email}
-                      </span>
-                    ) : (
-                      <span className="text-gray-300 text-xs">—</span>
-                    )}
-                  </td>
-                  {/* provider */}
-                  <td className="px-4 py-2.5 whitespace-nowrap">
-                    {l.provider
-                      ? <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                          l.provider === 'Google Workspace' ? 'bg-blue-100 text-blue-700' :
-                          l.provider === 'Office 365'       ? 'bg-orange-100 text-orange-700' :
-                          l.provider === 'Unknown'          ? 'bg-gray-100 text-gray-500' :
-                          'bg-purple-100 text-purple-700'
-                        }`}>{l.provider}</span>
-                      : <span className="text-gray-300 text-xs">—</span>}
-                  </td>
-                  {/* enrolled date */}
-                  <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap">
-                    {new Date(l.enrolled_at).toLocaleDateString()}
-                  </td>
-                  {/* Sending toggle + interest status dropdown */}
-                  <td className="px-4 py-2.5 whitespace-nowrap">
-                    <div className="flex items-center gap-2 flex-wrap">
+        <div className="space-y-3">
+          <div className="w-full max-w-full min-w-0 overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700 shadow-sm">
+            <table className="min-w-max w-full text-sm bg-white dark:bg-gray-900">
+              <thead>
+                <tr className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
+                  <th className="px-3 py-3 w-10 text-center">
+                    <input
+                      type="checkbox"
+                      checked={isAllPageSelected}
+                      ref={(el) => {
+                        if (el) el.indeterminate = isSomePageSelected && !isAllPageSelected;
+                      }}
+                      onChange={toggleSelectPage}
+                      className="rounded border-gray-300 text-teal-600 focus:ring-teal-500 cursor-pointer"
+                      title="Select all on this page"
+                    />
+                  </th>
+                  <th className="px-4 py-3 text-left font-semibold text-gray-600 dark:text-gray-300 whitespace-nowrap">Email</th>
+                  <th className="px-4 py-3 text-left font-semibold text-gray-600 dark:text-gray-300">Name</th>
+                  <th className="px-4 py-3 text-left font-semibold text-gray-600 dark:text-gray-300">Status</th>
+                  <th className="px-4 py-3 text-left font-semibold text-gray-600 dark:text-gray-300">Stage</th>
+                  <th className="px-4 py-3 text-left font-semibold text-gray-600 dark:text-gray-300 whitespace-nowrap">Inbox</th>
+                  <th className="px-4 py-3 text-left font-semibold text-gray-600 dark:text-gray-300 whitespace-nowrap">Provider</th>
+                  <th className="px-4 py-3 text-left font-semibold text-gray-600 dark:text-gray-300 whitespace-nowrap">Enrolled</th>
+                  <th className="px-4 py-3 text-left font-semibold text-gray-600 dark:text-gray-300 whitespace-nowrap">Sending</th>
+                  {customFields.map((f) => (
+                    <th key={f} className="px-4 py-3 text-left font-semibold text-gray-600 dark:text-gray-300 whitespace-nowrap capitalize">{f}</th>
+                  ))}
+                  <th className="px-4 py-3 text-right font-semibold text-gray-600 dark:text-gray-300 whitespace-nowrap">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {paginatedLeads.map((l) => (
+                  <tr
+                    key={l.lead_id}
+                    className={`border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50/60 dark:hover:bg-gray-800/50 transition-colors ${
+                      selectedIds.has(l.lead_id) ? 'bg-teal-50/40 dark:bg-teal-950/20' : ''
+                    }`}
+                  >
+                    {/* Checkbox */}
+                    <td className="px-3 py-2.5 text-center">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(l.lead_id)}
+                        onChange={() => toggleSelectOne(l.lead_id)}
+                        className="rounded border-gray-300 text-teal-600 focus:ring-teal-500 cursor-pointer"
+                      />
+                    </td>
+                    {/* email */}
+                    <td className="px-4 py-2.5">
                       <button
-                        className={`text-xs font-medium px-2 py-1 rounded transition-colors ${
-                          l.sending_paused
-                            ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200'
-                            : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
-                        }`}
-                        onClick={async () => {
-                          try {
-                            await api.patch(`/campaigns/${campaignId}/leads/${l.lead_id}`, {
-                              sending_paused: !l.sending_paused,
-                            });
-                            notify({ type: 'success', message: l.sending_paused ? 'Sending resumed' : 'Sending paused' });
-                            refresh();
-                          } catch (err) { notify({ type: 'error', message: err.message }); }
-                        }}
-                        title={l.sending_paused ? 'Click to resume sending' : 'Click to pause sending'}
+                        className="font-mono text-teal-600 dark:text-teal-400 hover:underline text-left"
+                        onClick={() => onViewQueue?.(l.email)}
+                        title="View queue for this lead"
                       >
-                        {l.sending_paused ? 'Paused' : 'Active'}
+                        {l.email}
                       </button>
-                      <select
-                        className={`text-[10px] font-medium rounded px-1.5 py-0.5 border cursor-pointer focus:outline-none focus:ring-1 focus:ring-teal-300 ${BADGE_STYLES[l.interest || l.interest_status] || 'bg-gray-50 text-gray-500 border-gray-200'}`}
-                        value={l.interest || l.interest_status || ''}
-                        title="Reply intent (per campaign) — click to change or remove"
-                        onChange={async (e) => {
-                          const newStatus = e.target.value;
-                          try {
-                            await api.patch(`/campaigns/${campaignId}/leads/${l.lead_id}`, {
-                              interest: newStatus,
-                            });
-                            notify({ type: 'success', message: newStatus ? `Marked as ${newStatus.replace(/_/g, ' ')}` : 'Cleared' });
-                            refresh();
-                          } catch (err) { notify({ type: 'error', message: err.message }); }
-                        }}
-                      >
-                        <option value="">— no interest —</option>
-                        <option value="interested">Interested</option>
-                        <option value="not_interested">Not Interested</option>
-                        <option value="out_of_office">Out of Office</option>
-                        <option value="auto_reply">Auto Reply</option>
-                      </select>
-                    </div>
-                  </td>
-                  {/* custom data columns — inline editable */}
-                  {customFields.map(f => {
-                    const isEditing = editCell?.leadId === l.lead_id && editCell?.field === f;
-                    const val = (l.custom_data || {})[f];
-                    return (
-                      <td key={f} className="px-4 py-2.5 max-w-[200px]">
-                        {isEditing ? (
-                          <input
-                            autoFocus
-                            className="w-full border border-teal-400 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                            value={editValue}
-                            onChange={e => setEditValue(e.target.value)}
-                            onBlur={() => commitEdit(l.lead_id)}
-                            onKeyDown={e => {
-                              if (e.key === 'Enter')  commitEdit(l.lead_id);
-                              if (e.key === 'Escape') cancelEdit();
-                            }}
-                          />
-                        ) : (
-                          <button
-                            className="w-full text-left px-2 py-1 rounded-md border border-transparent hover:border-teal-200 hover:bg-teal-50 transition-colors group"
-                            onClick={() => startEdit(l.lead_id, f, val)}
-                            title="Click to edit"
+                    </td>
+                    {/* name */}
+                    <td className="px-4 py-2.5 text-gray-700 dark:text-gray-300">{l.name || <span className="text-gray-300 dark:text-gray-600">—</span>}</td>
+                    {/* status badges */}
+                    <td className="px-4 py-2.5">
+                      <div className="flex flex-wrap gap-1">
+                        {deriveStatuses(l).map((s) => (
+                          <StatusBadge key={s} label={s} />
+                        ))}
+                      </div>
+                      {l.status === 'bounced' && (
+                        <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                          <span
+                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                              l.bounce_type === 'temporary_failure'
+                                ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 border border-amber-200 dark:border-amber-700'
+                                : 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300 border border-red-200 dark:border-red-700'
+                            }`}
+                            title={l.failure_reason ? `SMTP Details: ${l.failure_reason}` : (l.bounce_type === 'temporary_failure' ? 'Temporary provider error / rate limit (eligible for safe retry)' : 'Permanent hard bounce (suppressed across campaigns)')}
                           >
-                            {val != null
-                              ? <span className="text-gray-800">{String(val)}</span>
-                              : <span className="text-gray-300 italic group-hover:text-teal-300 text-xs">empty</span>
+                            <RiAlertLine size={11} className={l.bounce_type === 'temporary_failure' ? 'text-amber-600' : 'text-red-600'} />
+                            {l.bounce_type === 'temporary_failure' ? 'Temporary Error' : 'Hard Bounce'}
+                          </span>
+                          {l.failure_reason && (
+                            <span
+                              className="text-[10px] text-gray-500 dark:text-gray-400 truncate max-w-[140px] cursor-help"
+                              title={`Failure Reason: ${l.failure_reason}`}
+                            >
+                              {l.failure_reason}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                    {/* stage */}
+                    <td className="px-4 py-2.5 text-gray-600 dark:text-gray-400 whitespace-nowrap">{l.stage || '—'}</td>
+                    {/* inbox that last sent or will send next */}
+                    <td className="px-4 py-2.5 whitespace-nowrap">
+                      {l.from_inbox_email ? (
+                        <span className="font-mono text-xs text-gray-700 dark:text-gray-300" title="Last sent from this inbox, or next scheduled sender if none sent yet">
+                          {l.from_inbox_email}
+                        </span>
+                      ) : (
+                        <span className="text-gray-300 dark:text-gray-600 text-xs">—</span>
+                      )}
+                    </td>
+                    {/* provider */}
+                    <td className="px-4 py-2.5 whitespace-nowrap">
+                      {l.provider ? (
+                        <span
+                          className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                            l.provider === 'Google Workspace'
+                              ? 'bg-blue-100 text-blue-700'
+                              : l.provider === 'Office 365'
+                              ? 'bg-orange-100 text-orange-700'
+                              : l.provider === 'Unknown'
+                              ? 'bg-gray-100 text-gray-500'
+                              : 'bg-purple-100 text-purple-700'
+                          }`}
+                        >
+                          {l.provider}
+                        </span>
+                      ) : (
+                        <span className="text-gray-300 dark:text-gray-600 text-xs">—</span>
+                      )}
+                    </td>
+                    {/* enrolled date */}
+                    <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap">
+                      {new Date(l.enrolled_at).toLocaleDateString()}
+                    </td>
+                    {/* Sending toggle + interest status dropdown */}
+                    <td className="px-4 py-2.5 whitespace-nowrap">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <button
+                          className={`text-xs font-medium px-2 py-1 rounded transition-colors ${
+                            l.sending_paused
+                              ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200'
+                              : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
+                          }`}
+                          onClick={async () => {
+                            try {
+                              await api.patch(`/campaigns/${campaignId}/leads/${l.lead_id}`, {
+                                sending_paused: !l.sending_paused,
+                              });
+                              notify({ type: 'success', message: l.sending_paused ? 'Sending resumed' : 'Sending paused' });
+                              refresh();
+                            } catch (err) {
+                              notify({ type: 'error', message: err.message });
                             }
+                          }}
+                          title={l.sending_paused ? 'Click to resume sending' : 'Click to pause sending'}
+                        >
+                          {l.sending_paused ? 'Paused' : 'Active'}
+                        </button>
+                        <select
+                          className={`text-[10px] font-medium rounded px-1.5 py-0.5 border cursor-pointer focus:outline-none focus:ring-1 focus:ring-teal-300 ${
+                            BADGE_STYLES[l.interest || l.interest_status] || 'bg-gray-50 text-gray-500 border-gray-200'
+                          }`}
+                          value={l.interest || l.interest_status || ''}
+                          title="Reply intent (per campaign) — click to change or remove"
+                          onChange={async (e) => {
+                            const newStatus = e.target.value;
+                            try {
+                              await api.patch(`/campaigns/${campaignId}/leads/${l.lead_id}`, {
+                                interest: newStatus,
+                              });
+                              notify({ type: 'success', message: newStatus ? `Marked as ${newStatus.replace(/_/g, ' ')}` : 'Cleared' });
+                              refresh();
+                            } catch (err) {
+                              notify({ type: 'error', message: err.message });
+                            }
+                          }}
+                        >
+                          <option value="">— no interest —</option>
+                          <option value="interested">Interested</option>
+                          <option value="not_interested">Not Interested</option>
+                          <option value="out_of_office">Out of Office</option>
+                          <option value="auto_reply">Auto Reply</option>
+                        </select>
+                      </div>
+                    </td>
+                    {/* custom data columns — inline editable */}
+                    {customFields.map((f) => {
+                      const isEditing = editCell?.leadId === l.lead_id && editCell?.field === f;
+                      const val = (l.custom_data || {})[f];
+                      return (
+                        <td key={f} className="px-4 py-2.5 max-w-[200px]">
+                          {isEditing ? (
+                            <input
+                              autoFocus
+                              className="w-full border border-teal-400 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                              value={editValue}
+                              onChange={(e) => setEditValue(e.target.value)}
+                              onBlur={() => commitEdit(l.lead_id)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') commitEdit(l.lead_id);
+                                if (e.key === 'Escape') cancelEdit();
+                              }}
+                            />
+                          ) : (
+                            <button
+                              className="w-full text-left px-2 py-1 rounded-md border border-transparent hover:border-teal-200 hover:bg-teal-50 transition-colors group"
+                              onClick={() => startEdit(l.lead_id, f, val)}
+                              title="Click to edit"
+                            >
+                              {val != null ? (
+                                <span className="text-gray-800 dark:text-gray-200">{String(val)}</span>
+                              ) : (
+                                <span className="text-gray-300 italic group-hover:text-teal-300 text-xs">empty</span>
+                              )}
+                            </button>
+                          )}
+                        </td>
+                      );
+                    })}
+                    {/* actions column */}
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <div className="flex items-center justify-end gap-1.5">
+                        {l.status === 'bounced' && l.bounce_type === 'temporary_failure' && (
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 px-2 py-0.5 rounded border border-blue-200 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-950/40 transition-colors"
+                            onClick={() => retryLeadSend(l.lead_id)}
+                            title="Retry sending to this address (temporary failure)"
+                          >
+                            <RiRestartLine size={12} />
+                            Retry
                           </button>
                         )}
-                      </td>
-                    );
-                  })}
-                  {/* remove */}
-                  <td className="px-4 py-2.5 text-right">
-                    <button
-                      className="text-red-400 hover:text-red-600 text-xs font-medium transition-colors"
-                      onClick={() => removeLead(l.lead_id, l.email)}
-                    >
-                      Remove
-                    </button>
-                  </td>
-                </tr>
+                        {l.status === 'stopped' ? (
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 hover:text-emerald-800 dark:text-emerald-400 dark:hover:text-emerald-300 px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-950/40 transition-colors"
+                            onClick={() => resumeSequenceForLead(l.lead_id)}
+                            title="Resume sequence and schedule next steps"
+                          >
+                            <RiPlayCircleLine size={12} />
+                            Resume
+                          </button>
+                        ) : (l.status === 'active' || l.status === 'contacted') ? (
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-600 hover:text-amber-800 dark:text-amber-400 dark:hover:text-amber-300 px-2 py-0.5 rounded border border-amber-200 dark:border-amber-800 bg-amber-50/60 dark:bg-amber-950/40 transition-colors"
+                            onClick={() => stopSequenceForLead(l.lead_id)}
+                            title="Stop sequence / Unenroll (immediately cancels follow-ups)"
+                          >
+                            <RiStopCircleLine size={12} />
+                            Stop
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-1 text-[11px] font-medium text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 px-2 py-0.5 rounded border border-red-200 dark:border-red-900/50 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
+                          onClick={() => removeLead(l.lead_id, l.email)}
+                          title="Remove from campaign (central prospect record remains safe)"
+                        >
+                          <RiDeleteBinLine size={12} />
+                          Remove
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination Controls */}
+          {filteredLeads.length > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 text-xs text-gray-500">
+              <div className="flex items-center gap-2">
+                <span>Rows per page:</span>
+                <select
+                  value={pageSize}
+                  onChange={(e) => {
+                    setPageSize(Number(e.target.value));
+                    setPage(1);
+                  }}
+                  className="border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-1 focus:ring-teal-400"
+                >
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+                <span className="text-gray-400">
+                  Showing {Math.min((page - 1) * pageSize + 1, filteredLeads.length)}–
+                  {Math.min(page * pageSize, filteredLeads.length)} of {filteredLeads.length} leads
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={page <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                >
+                  Previous
+                </Button>
+                <span className="px-2 font-medium text-gray-700 dark:text-gray-300">
+                  Page {page} of {totalPages}
+                </span>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={page >= totalPages}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                >
+                  Next
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Bulk Remove Confirmation Modal */}
+      {showBulkRemoveConfirm && (
+        <div
+          className="fixed inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center z-50 p-4"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setShowBulkRemoveConfirm(false);
+          }}
+        >
+          <div
+            data-darkreader-ignore
+            className="rounded-xl shadow-2xl p-6 w-full max-w-lg mx-auto bg-white border border-gray-200 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 text-red-600">
+              <div className="p-2.5 rounded-full bg-red-100 shrink-0">
+                <RiAlertLine size={24} />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">Remove Leads from Campaign</h3>
+                <p className="text-xs text-gray-500">Campaign: {campaignName}</p>
+              </div>
+            </div>
+
+            <div className="p-3.5 bg-red-50/80 border border-red-200 rounded-lg text-xs text-red-900 space-y-2">
+              <p className="font-semibold text-sm text-red-800">
+                Are you sure you want to remove {selectedIds.size} selected lead{selectedIds.size !== 1 ? 's' : ''} from this campaign?
+              </p>
+              <p className="text-gray-600 leading-relaxed">
+                Pending scheduled emails and sequence follow-ups will be immediately cancelled for all selected leads.
+              </p>
+              <div className="mt-2 p-2.5 bg-white rounded border border-emerald-200 text-emerald-800 flex items-start gap-2 shadow-2xs">
+                <RiCheckboxCircleLine className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <span className="leading-snug">
+                  <strong>Central Prospect Database is safe:</strong> Contact records in your central Prospects database, sending logs, delivery history, bounce events, and audit records will <strong>NOT</strong> be deleted.
+                </span>
+              </div>
+            </div>
+
+            <div className="max-h-44 overflow-y-auto border border-gray-200 rounded-lg p-2.5 text-xs text-gray-600 space-y-1.5 bg-gray-50">
+              {selectedLeadsList.slice(0, 20).map((l) => (
+                <div key={l.lead_id} className="flex items-center justify-between py-0.5 border-b border-gray-100 last:border-0">
+                  <span className="font-mono text-gray-800 font-medium">{l.email}</span>
+                  <span className="text-gray-400 capitalize">{l.name || l.status}</span>
+                </div>
               ))}
-            </tbody>
-          </table>
+              {selectedIds.size > 20 && (
+                <div className="text-center py-1 text-gray-400 italic">
+                  + {selectedIds.size - 20} more lead{selectedIds.size - 20 !== 1 ? 's' : ''}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-gray-100">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={bulkActionLoading}
+                onClick={() => setShowBulkRemoveConfirm(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                className="bg-red-600 hover:bg-red-700 text-white font-medium shadow-sm"
+                disabled={bulkActionLoading}
+                onClick={handleExecuteBulkRemove}
+              >
+                {bulkActionLoading ? 'Removing…' : `Remove ${selectedIds.size} Lead${selectedIds.size !== 1 ? 's' : ''}`}
+              </Button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1235,6 +1677,16 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
           </div>
         </div>
       )}
+
+      {/* Select Existing Prospects Modal */}
+      <SelectProspectsModal
+        isOpen={selectProspectsOpen}
+        onClose={() => setSelectProspectsOpen(false)}
+        campaignId={Number(campaignId)}
+        campaignName={campaignName}
+        isCampaignPaused={isCampaignPaused}
+        onEnrolled={() => refresh()}
+      />
 
     </div>
   );

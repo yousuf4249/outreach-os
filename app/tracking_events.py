@@ -100,6 +100,9 @@ async def resolve_email_log_for_open(db: AsyncSession, token: str) -> EmailLog |
 
 async def record_email_open(db: AsyncSession, token: str, ip: str | None) -> bool:
     """Persist open event if applicable. Returns True if an open was recorded."""
+    from app.unibox import unibox_events
+    now = time_provider.utcnow()
+
     email_log = await resolve_email_log_for_open(db, token)
     if not email_log:
         from app.models import DirectEmail
@@ -112,11 +115,45 @@ async def record_email_open(db: AsyncSession, token: str, ip: str | None) -> boo
             return False
         direct_email.opened = True
         if not direct_email.opened_at:
-            direct_email.opened_at = time_provider.utcnow()
+            direct_email.opened_at = now
+        direct_email.last_opened_at = now
         direct_email.open_count = (direct_email.open_count or 0) + 1
+        
+        # Keep open history entries
+        history = list(direct_email.open_history or [])
+        history.append({
+            "opened_at": now.isoformat() + "Z",
+            "ip_address": ip or None,
+        })
+        direct_email.open_history = history
         await db.commit()
-        log.info("direct_email open recorded: id=%s to=%s", direct_email.id, direct_email.to_email)
+        log.info("direct_email open recorded: id=%s to=%s (count=%s)", direct_email.id, direct_email.to_email, direct_email.open_count)
+
+        # Notify via SSE
+        try:
+            await unibox_events.publish({
+                "type": "unibox.tracking.event",
+                "event": "open",
+                "channel": "direct_email",
+                "direct_email_id": direct_email.id,
+                "thread_id": direct_email.thread_id,
+                "inbox_id": direct_email.inbox_id,
+                "lead_id": direct_email.lead_id,
+                "open_count": direct_email.open_count,
+                "timestamp": now.isoformat() + "Z",
+            })
+            if direct_email.thread_id and direct_email.inbox_id:
+                await unibox_events.publish({
+                    "type": "unibox.thread.updated",
+                    "reason": "tracking_open",
+                    "inbox_id": direct_email.inbox_id,
+                    "thread_id": direct_email.thread_id,
+                    "timestamp": now.isoformat() + "Z",
+                })
+        except Exception as sse_err:
+            log.debug("SSE tracking event broadcast exception: %s", sse_err)
         return True
+
     if await is_known_ip(db, ip):
         log.debug("open: skipping known IP %s for log_id=%s", ip, email_log.id)
         return False
@@ -126,10 +163,40 @@ async def record_email_open(db: AsyncSession, token: str, ip: str | None) -> boo
         EmailOpen(
             email_log_id=email_log.id,
             ip_address=ip,
-            opened_at=time_provider.utcnow(),
+            opened_at=now,
         )
     )
     await db.commit()
+
+    # Query total opens count for this email_log
+    from sqlalchemy import func
+    cnt_res = await db.execute(select(func.count(EmailOpen.id)).where(EmailOpen.email_log_id == email_log.id))
+    tot_opens = cnt_res.scalar() or 1
+
+    # Notify via SSE
+    try:
+        await unibox_events.publish({
+            "type": "unibox.tracking.event",
+            "event": "open",
+            "channel": "campaign_email",
+            "email_log_id": email_log.id,
+            "thread_id": email_log.thread_id,
+            "inbox_id": email_log.inbox_id,
+            "lead_id": email_log.lead_id,
+            "open_count": tot_opens,
+            "timestamp": now.isoformat() + "Z",
+        })
+        if email_log.thread_id and email_log.inbox_id:
+            await unibox_events.publish({
+                "type": "unibox.thread.updated",
+                "reason": "tracking_open",
+                "inbox_id": email_log.inbox_id,
+                "thread_id": email_log.thread_id,
+                "timestamp": now.isoformat() + "Z",
+            })
+    except Exception as sse_err:
+        log.debug("SSE tracking event broadcast exception: %s", sse_err)
+
     await fire_webhook_event(
         db,
         "email.opened",
@@ -138,7 +205,7 @@ async def record_email_open(db: AsyncSession, token: str, ip: str | None) -> boo
             "lead_id": email_log.lead_id,
             "campaign_id": email_log.campaign_id,
             "ip_address": ip,
-            "timestamp": time_provider.utcnow().isoformat() + "Z",
+            "timestamp": now.isoformat() + "Z",
         },
     )
     return True
@@ -167,14 +234,39 @@ async def record_email_click(db: AsyncSession, token: str, ip: str | None) -> bo
         return False
     if not email_log.clicked:
         email_log.clicked = True
+    now = time_provider.utcnow()
     db.add(
         EmailClick(
             email_log_id=tracked.email_log_id,
             ip_address=ip,
-            clicked_at=time_provider.utcnow(),
+            clicked_at=now,
         )
     )
     await db.commit()
+
+    from app.unibox import unibox_events
+    try:
+        await unibox_events.publish({
+            "type": "unibox.tracking.event",
+            "event": "click",
+            "channel": "campaign_email",
+            "email_log_id": email_log.id,
+            "thread_id": email_log.thread_id,
+            "inbox_id": email_log.inbox_id,
+            "lead_id": email_log.lead_id,
+            "url": tracked.original_url,
+            "timestamp": now.isoformat() + "Z",
+        })
+        if email_log.thread_id and email_log.inbox_id:
+            await unibox_events.publish({
+                "type": "unibox.thread.updated",
+                "reason": "tracking_click",
+                "inbox_id": email_log.inbox_id,
+                "thread_id": email_log.thread_id,
+                "timestamp": now.isoformat() + "Z",
+            })
+    except Exception as sse_err:
+        log.debug("SSE tracking click broadcast exception: %s", sse_err)
     await fire_webhook_event(
         db,
         "email.clicked",

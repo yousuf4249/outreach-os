@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { FileUploadArea } from '../components/ui/FileUploadArea';
 import logo from '../assets/weblinx_logo.svg';
+import { RiEyeLine, RiEyeOffLine } from 'react-icons/ri';
 
 const BACKUP_MIN_PASSWORD_LEN = 8;
 
@@ -23,6 +24,7 @@ export default function Login() {
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [authError, setAuthError] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
 
@@ -30,6 +32,7 @@ export default function Login() {
   const [restoreFile, setRestoreFile] = useState(null);
   const [restoreFileKey, setRestoreFileKey] = useState(0);
   const [restorePassword, setRestorePassword] = useState('');
+  const [showRestorePassword, setShowRestorePassword] = useState(false);
   const [restoreMeta, setRestoreMeta] = useState(null);
   const [restoreMetaBusy, setRestoreMetaBusy] = useState(false);
   const [restorePreview, setRestorePreview] = useState(null);
@@ -173,14 +176,25 @@ export default function Login() {
             <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wider mb-1">
               Password {isFirstUser && <span className="text-[10px] text-gray-400 font-normal">(Min 8 chars, 1 uppercase, 1 digit)</span>}
             </label>
-            <input
-              type="password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••••••"
-              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-800 dark:text-white transition"
-            />
+            <div className="relative">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••••••"
+                className="w-full px-3 py-2 pr-10 text-sm border border-gray-300 dark:border-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-800 dark:text-white transition"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                tabIndex={-1}
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors cursor-pointer"
+              >
+                {showPassword ? <RiEyeOffLine size={18} /> : <RiEyeLine size={18} />}
+              </button>
+            </div>
           </div>
 
           <button
@@ -291,13 +305,24 @@ export default function Login() {
 
                 {restoreMeta && restoreMeta.encrypted && !restorePreview && (
                   <div className="space-y-2">
-                    <input
-                      type="password"
-                      placeholder="Backup decryption password"
-                      value={restorePassword}
-                      onChange={e => setRestorePassword(e.target.value)}
-                      className="w-full px-3 py-1.5 text-xs border border-gray-300 rounded"
-                    />
+                    <div className="relative">
+                      <input
+                        type={showRestorePassword ? 'text' : 'password'}
+                        placeholder="Backup decryption password"
+                        value={restorePassword}
+                        onChange={e => setRestorePassword(e.target.value)}
+                        className="w-full px-3 py-1.5 pr-8 text-xs border border-gray-300 rounded"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowRestorePassword(!showRestorePassword)}
+                        tabIndex={-1}
+                        aria-label={showRestorePassword ? 'Hide password' : 'Show password'}
+                        className="absolute inset-y-0 right-0 pr-2 flex items-center text-gray-400 hover:text-gray-600 transition-colors cursor-pointer"
+                      >
+                        {showRestorePassword ? <RiEyeOffLine size={14} /> : <RiEyeLine size={14} />}
+                      </button>
+                    </div>
                     <button
                       type="button"
                       disabled={restorePreviewBusy || restorePassword.length < BACKUP_MIN_PASSWORD_LEN}

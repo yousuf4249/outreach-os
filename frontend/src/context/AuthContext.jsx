@@ -7,8 +7,13 @@ const AuthContext = createContext(null);
 const ACCESS_TOKEN_EXPIRE_MINUTES = 30;
 const AUTO_REFRESH_INTERVAL_MS = (ACCESS_TOKEN_EXPIRE_MINUTES - 5) * 60 * 1000;
 
-// Store the access token in memory only (not localStorage) to prevent XSS access
-let _accessToken = null;
+let _accessToken = (() => {
+  try {
+    return localStorage.getItem('access_token') || sessionStorage.getItem('access_token') || null;
+  } catch {
+    return null;
+  }
+})();
 
 export function getAccessToken() {
   return _accessToken;
@@ -16,6 +21,15 @@ export function getAccessToken() {
 
 export function setAccessToken(token) {
   _accessToken = token;
+  try {
+    if (token) {
+      localStorage.setItem('access_token', token);
+      sessionStorage.setItem('access_token', token);
+    } else {
+      localStorage.removeItem('access_token');
+      sessionStorage.removeItem('access_token');
+    }
+  } catch {}
 }
 
 export function AuthProvider({ children }) {
@@ -31,10 +45,10 @@ export function AuthProvider({ children }) {
       });
       if (res.ok) {
         const data = await res.json();
-        _accessToken = data.access_token;
+        setAccessToken(data.access_token);
         // Re-fetch user with new token
         const userRes = await fetch('/api/auth/me', {
-          headers: { Authorization: `Bearer ${_accessToken}` },
+          headers: { Authorization: `Bearer ${data.access_token}` },
         });
         if (userRes.ok) {
           setUser(await userRes.json());
@@ -42,7 +56,7 @@ export function AuthProvider({ children }) {
         }
       }
     } catch { /* ignore */ }
-    _accessToken = null;
+    setAccessToken(null);
     setUser(null);
     return false;
   }, []);
@@ -63,7 +77,7 @@ export function AuthProvider({ children }) {
         // Token might be expired, try refresh
         const refreshed = await refreshToken();
         if (!refreshed) {
-          _accessToken = null;
+          setAccessToken(null);
           setUser(null);
         }
       }
@@ -79,7 +93,7 @@ export function AuthProvider({ children }) {
       method: 'POST',
       credentials: 'include',
     }).catch(() => {});
-    _accessToken = null;
+    setAccessToken(null);
     setUser(null);
   }, []);
 
@@ -113,7 +127,7 @@ export function AuthProvider({ children }) {
       const msg = typeof d === 'string' ? d : Array.isArray(d) ? d.map(x => x.msg || x).join('; ') : 'Login failed';
       throw new Error(msg);
     }
-    _accessToken = data.access_token;
+    setAccessToken(data.access_token);
     await fetchUser();
     await checkSetup();
     return true;
@@ -141,10 +155,23 @@ export function AuthProvider({ children }) {
     return login(username, password);
   }, [login]);
 
-  // On mount: check setup status, try refresh from httpOnly cookie
+  // On mount: check setup status, try cached token first, then fallback to refresh cookie
   useEffect(() => {
     (async () => {
       await checkSetup();
+      const currentToken = getAccessToken();
+      if (currentToken) {
+        try {
+          const userRes = await fetch('/api/auth/me', {
+            headers: { Authorization: `Bearer ${currentToken}` },
+          });
+          if (userRes.ok) {
+            setUser(await userRes.json());
+            setLoading(false);
+            return;
+          }
+        } catch { /* ignore */ }
+      }
       await refreshToken();
       setLoading(false);
     })();

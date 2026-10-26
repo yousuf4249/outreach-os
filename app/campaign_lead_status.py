@@ -11,19 +11,21 @@ if TYPE_CHECKING:
 
 # Enrollment (per CampaignLead) — pipeline position / outcome for this campaign.
 ENROLLMENT_STATUSES = frozenset(
-    {"active", "contacted", "completed", "bounced", "unsubscribed", "wrong_person", "needs_custom_email"}
+    {"active", "contacted", "completed", "bounced", "unsubscribed", "wrong_person", "needs_custom_email", "stopped"}
 )
 
 # Reply / intent classification (per CampaignLead). Unsubscribe & wrong person live in enrollment.
 LEAD_INTERESTS = frozenset({"interested", "not_interested", "out_of_office", "auto_reply"})
 
-VERIFICATION_BLOCKS_SEND = frozenset({"invalid", "risky", "pending"})
+# Verification statuses that require explicit user review & approval before sending
+VERIFICATION_NEEDS_REVIEW = frozenset({"unknown", "catch_all", "risky", "not_verified", "pending"})
+VERIFICATION_BLOCKS_SEND = frozenset({"invalid"})
 
 
 def enrollment_blocks_sends(status: str | None) -> bool:
     if not status:
         return False
-    return status in ("bounced", "unsubscribed", "wrong_person", "completed")
+    return status in ("bounced", "unsubscribed", "wrong_person", "completed", "stopped")
 
 
 def interest_blocks_sends(interest: str | None) -> bool:
@@ -31,10 +33,40 @@ def interest_blocks_sends(interest: str | None) -> bool:
 
 
 def campaign_lead_may_receive_sends(cl: "CampaignLead", lead: "Lead") -> bool:
-    """True if this enrollment should be considered for outbound scheduling."""
-    ev = getattr(lead, "email_verification_status", None)
-    if ev in VERIFICATION_BLOCKS_SEND:
+    """True if this enrollment should be considered for outbound scheduling.
+
+    Rules:
+    - Invalid syntax: Strictly blocked (never send).
+    - 'invalid': Strictly blocked (never send).
+    - 'valid', 'domain_validated': Allowed to send.
+    - 'unknown', 'catch_all', 'risky', 'not_verified': Require explicit review & approval.
+    """
+    from app.verification_engine import validate_syntax_and_normalize
+
+    # Syntax validation: invalid syntax strictly blocks sending regardless of approval
+    syntax_valid, _, _, _, _ = validate_syntax_and_normalize(getattr(lead, "email", "") or "")
+    if not syntax_valid:
         return False
+
+    ev = getattr(lead, "email_verification_status", None)
+    ev_result = getattr(lead, "email_verification_result", None) or {}
+    is_approved = bool(ev_result.get("approved") or ev_result.get("review_approved"))
+
+    # Invalid is strictly blocked
+    if ev == "invalid":
+        return False
+
+    # Valid and Domain Validated pass the verification gate
+    if ev in ("valid", "domain_validated"):
+        pass
+    elif ev in VERIFICATION_NEEDS_REVIEW:
+        if not is_approved:
+            return False
+    elif ev is None:
+        # Leads with no status yet: require approval if an explicit verification result exists with approved=False
+        if ev_result.get("approved") is False:
+            return False
+
     if getattr(cl, "sending_paused", False):
         return False
     st = getattr(cl, "enrollment_status", None) or "active"
@@ -55,7 +87,6 @@ def campaign_lead_schedule_eligibility_clause():
     """
     from app.models import Campaign, CampaignLead, Lead, LeadReply
 
-    _ver = tuple(VERIFICATION_BLOCKS_SEND)
     has_reply = exists(
         select(1).where(
             LeadReply.lead_id == CampaignLead.lead_id,
@@ -71,7 +102,7 @@ def campaign_lead_schedule_eligibility_clause():
         ),
         or_(
             Lead.email_verification_status.is_(None),
-            Lead.email_verification_status.notin_(_ver),
+            Lead.email_verification_status != "invalid",
         ),
         or_(Campaign.stop_on_reply.is_(False), ~has_reply),
     )

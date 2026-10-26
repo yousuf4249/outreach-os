@@ -21,6 +21,7 @@ import EmailVerificationSettings from '../components/EmailVerificationSettings';
 
 const SETTINGS_TABS = [
   { id: 'general', label: 'General' },
+  { id: 'sending', label: 'Sending Settings' },
   { id: 'setup', label: 'Setup' },
   { id: 'features', label: 'Features' },
   { id: 'integrating', label: 'Integrating' },
@@ -35,6 +36,10 @@ const SECTIONS_BY_TAB = {
     { id: 'account', label: 'Account & Security' },
     { id: 'known-ips', label: 'Known IPs' },
     { id: 'about', label: 'About' },
+  ],
+  sending: [
+    { id: 'monthly-budget', label: 'Monthly Budget' },
+    { id: 'active-accounts', label: 'Active Senders' },
   ],
   setup: [
     { id: 'gmail-sync', label: 'Gmail sync' },
@@ -300,14 +305,38 @@ export default function Settings() {
   const [currentIp, setCurrentIp] = useState('');
   const [newIpAddress, setNewIpAddress] = useState('');
 
-  const [activeTab, setActiveTab] = useState('general');
+  const [activeTab, setActiveTab] = useState(() => {
+    const hash = typeof window !== 'undefined' ? window.location.hash.replace('#', '') : '';
+    if (hash && SETTINGS_TABS.some(t => t.id === hash)) return hash;
+    const urlParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+    const tabParam = urlParams?.get('tab');
+    if (tabParam && SETTINGS_TABS.some(t => t.id === tabParam)) return tabParam;
+    return 'general';
+  });
   const tabContentRef = useRef(null);
   const [activeSectionDomId, setActiveSectionDomId] = useState('');
+
+  /* ── sending budget state ── */
+  const [sendingBudget, setSendingBudget] = useState({
+    monthly_budget: 10000,
+    sent_this_month: 0,
+    remaining_budget: 10000,
+    usage_percentage: 0.0,
+    is_exhausted: false,
+    billing_period_start: '',
+    billing_period_end: '',
+    billing_cycle_start_day: 1,
+    active_inboxes_count: 0,
+    active_inboxes: [],
+  });
+  const [budgetInput, setBudgetInput] = useState('10000');
+  const [cycleDayInput, setCycleDayInput] = useState('1');
+  const [savingSendingBudget, setSavingSendingBudget] = useState(false);
 
   /* ── load data ── */
   const loadAll = useCallback(async () => {
     try {
-      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData, notifData, gmailSyncData, mcpData, telData, noticesData] = await Promise.all([
+      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData, notifData, gmailSyncData, mcpData, telData, noticesData, budgetData] = await Promise.all([
         api.get('/settings/scheduling-strategy'),
         api.get('/settings/test-mode'),
         api.get('/settings/webhooks'),
@@ -321,11 +350,17 @@ export default function Settings() {
         api.get('/settings/mcp-setup').catch(() => null),
         api.get('/settings/telemetry').catch(() => null),
         api.get('/notices').catch(() => null),
+        api.get('/settings/sending-budget').catch(() => null),
       ]);
       setStrategy(stratData.scheduling_strategy || 'priority');
       setTestMode(tmData.test_mode || false);
       if (telData) setTelemetryEnabled(telData.telemetry_enabled !== false);
       if (noticesData) setNotices(noticesData);
+      if (budgetData) {
+        setSendingBudget(budgetData);
+        setBudgetInput(String(budgetData.monthly_budget || 10000));
+        setCycleDayInput(String(budgetData.billing_cycle_start_day || 1));
+      }
       setWebhooks(whList || []);
       setEventTypes(evtData.events || []);
       // default new webhook events = all
@@ -437,6 +472,10 @@ export default function Settings() {
   useEffect(() => {
     const syncFromHash = () => {
       let raw = (window.location.hash || '').replace(/^#/, '');
+      if (!raw) {
+        const urlParams = new URLSearchParams(window.location.search);
+        raw = urlParams.get('tab') || '';
+      }
       if (!raw) raw = 'general';
       const id = visibleTabs.some(t => t.id === raw) ? raw : 'general';
       setActiveTab(id);
@@ -492,6 +531,33 @@ export default function Settings() {
       if (raf) cancelAnimationFrame(raf);
     };
   }, [sectionNav]);
+
+
+  const handleSaveSendingBudget = async (e) => {
+    e?.preventDefault();
+    setSavingSendingBudget(true);
+    try {
+      const budgetVal = parseInt(budgetInput, 10);
+      const cycleDayVal = parseInt(cycleDayInput, 10);
+      if (isNaN(budgetVal) || budgetVal < 0) {
+        notify.error('Monthly sending budget must be a positive number');
+        setSavingSendingBudget(false);
+        return;
+      }
+      const res = await api.post('/settings/sending-budget', {
+        monthly_budget: budgetVal,
+        billing_cycle_start_day: isNaN(cycleDayVal) ? 1 : cycleDayVal,
+      });
+      setSendingBudget(res);
+      setBudgetInput(String(res.monthly_budget));
+      setCycleDayInput(String(res.billing_cycle_start_day));
+      notify.success('Monthly sending budget saved successfully');
+    } catch (err) {
+      notify.error(err.message || 'Failed to update sending budget');
+    } finally {
+      setSavingSendingBudget(false);
+    }
+  };
 
   const selectTab = id => {
     if (!visibleTabs.some(t => t.id === id)) return;
@@ -1153,6 +1219,220 @@ export default function Settings() {
           )}
         </section>
           </>
+        )}
+
+        {activeTab === 'sending' && (
+          <div className="space-y-8 max-w-4xl">
+            {/* Section 1: Monthly Budget & Real-time Usage */}
+            <section id="settings-monthly-budget" className="scroll-mt-6">
+              <div className="border-b border-gray-200 dark:border-gray-700 pb-3 mb-6">
+                <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                  <span>Global Monthly Sending Budget</span>
+                  <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-teal-500/10 text-teal-600 dark:text-teal-400 border border-teal-500/20">
+                    System-Wide Ceiling
+                  </span>
+                </h2>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                  One centralized monthly sending budget controlling total outbound email volume across all SMTP accounts and campaigns.
+                  Campaign schedules, days, hours, timezones, and intervals remain completely independent.
+                </p>
+              </div>
+
+              {/* Status / Metric Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+                <div className="bg-white dark:bg-slate-900/80 p-5 rounded-xl border border-gray-200 dark:border-slate-800 shadow-xs">
+                  <div className="text-xs font-medium text-gray-500 dark:text-slate-400 uppercase tracking-wider">Monthly Budget</div>
+                  <div className="text-2xl font-bold font-mono text-gray-900 dark:text-white mt-1">
+                    {(sendingBudget.monthly_budget || 0).toLocaleString()}
+                  </div>
+                  <div className="text-xs text-gray-500 dark:text-slate-500 mt-1">
+                    Outbound ceiling allowance
+                  </div>
+                </div>
+
+                <div className="bg-white dark:bg-slate-900/80 p-5 rounded-xl border border-gray-200 dark:border-slate-800 shadow-xs">
+                  <div className="text-xs font-medium text-gray-500 dark:text-slate-400 uppercase tracking-wider">Sent This Month</div>
+                  <div className="text-2xl font-bold font-mono text-teal-600 dark:text-teal-400 mt-1">
+                    {(sendingBudget.sent_this_month || 0).toLocaleString()}
+                  </div>
+                  <div className="text-xs text-gray-500 dark:text-slate-500 mt-1">
+                    {sendingBudget.usage_percentage}% of monthly budget
+                  </div>
+                </div>
+
+                <div className="bg-white dark:bg-slate-900/80 p-5 rounded-xl border border-gray-200 dark:border-slate-800 shadow-xs">
+                  <div className="text-xs font-medium text-gray-500 dark:text-slate-400 uppercase tracking-wider">Remaining Budget</div>
+                  <div className="text-2xl font-bold font-mono text-emerald-600 dark:text-emerald-400 mt-1">
+                    {(sendingBudget.remaining_budget || 0).toLocaleString()}
+                  </div>
+                  <div className="text-xs text-gray-500 dark:text-slate-500 mt-1">
+                    Available for dispatch
+                  </div>
+                </div>
+              </div>
+
+              {/* Budget Progress Bar */}
+              <div className="bg-white dark:bg-slate-900/80 p-5 rounded-xl border border-gray-200 dark:border-slate-800 shadow-xs space-y-3 mb-6">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-medium text-gray-700 dark:text-slate-300">Billing Cycle Budget Utilization</span>
+                  <span className="font-mono text-gray-500 dark:text-slate-400">
+                    {sendingBudget.sent_this_month} / {sendingBudget.monthly_budget} emails ({sendingBudget.usage_percentage}%)
+                  </span>
+                </div>
+                <div className="w-full bg-gray-100 dark:bg-slate-800 rounded-full h-3 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-500 ${
+                      sendingBudget.is_exhausted
+                        ? 'bg-rose-500'
+                        : sendingBudget.usage_percentage > 85
+                        ? 'bg-amber-500'
+                        : 'bg-teal-500'
+                    }`}
+                    style={{ width: `${Math.min(100, Math.max(0.5, sendingBudget.usage_percentage || 0))}%` }}
+                  />
+                </div>
+                <div className="flex flex-wrap items-center justify-between text-xs text-gray-500 dark:text-slate-400 pt-1">
+                  <span>
+                    Current Period:{' '}
+                    <strong className="text-gray-700 dark:text-slate-200 font-mono">
+                      {sendingBudget.billing_period_start ? new Date(sendingBudget.billing_period_start).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Oct 1, 2026'}
+                      {' – '}
+                      {sendingBudget.billing_period_end ? new Date(sendingBudget.billing_period_end).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Nov 1, 2026'}
+                    </strong>
+                  </span>
+                  <span>
+                    Resets on day <strong className="text-gray-700 dark:text-slate-200 font-mono">{sendingBudget.billing_cycle_start_day || 1}</strong> of each month
+                  </span>
+                </div>
+              </div>
+
+              {/* Configuration Form */}
+              <div className="bg-white dark:bg-slate-900/80 p-6 rounded-xl border border-gray-200 dark:border-slate-800 shadow-xs space-y-5">
+                <h3 className="text-base font-semibold text-gray-900 dark:text-white">Configure Monthly Allowance</h3>
+                
+                <div className="space-y-3">
+                  <label className="block text-xs font-medium text-gray-700 dark:text-slate-300">
+                    Monthly Sending Target (Emails / Month)
+                  </label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {[10000, 30000, 50000, 100000].map(val => (
+                      <button
+                        key={val}
+                        type="button"
+                        onClick={() => setBudgetInput(String(val))}
+                        className={`px-3 py-1.5 text-xs font-semibold font-mono rounded-lg border transition-colors ${
+                          budgetInput === String(val)
+                            ? 'bg-teal-500/20 text-teal-400 border-teal-500/40 ring-1 ring-teal-500/40'
+                            : 'bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-300 border-gray-200 dark:border-slate-700 hover:border-gray-300 dark:hover:border-slate-600'
+                        }`}
+                      >
+                        {val.toLocaleString()}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+                    <div>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1000"
+                        value={budgetInput}
+                        onChange={e => setBudgetInput(e.target.value)}
+                        className="w-full px-3 py-2 text-sm font-mono rounded-lg border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-teal-500"
+                        placeholder="e.g. 10000"
+                      />
+                      <p className="text-[11px] text-gray-500 dark:text-slate-400 mt-1">
+                        Total maximum emails permitted across all campaigns per billing period.
+                      </p>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min="1"
+                          max="28"
+                          value={cycleDayInput}
+                          onChange={e => setCycleDayInput(e.target.value)}
+                          className="w-24 px-3 py-2 text-sm font-mono rounded-lg border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-gray-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-teal-500"
+                        />
+                        <span className="text-xs text-gray-600 dark:text-slate-400">
+                          Billing cycle start day (1–28)
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-gray-500 dark:text-slate-400 mt-1">
+                        Default is 1 (calendar month rollover).
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t border-gray-100 dark:border-slate-800">
+                  <div className="text-xs text-gray-500 dark:text-slate-400">
+                    A monthly budget is a ceiling allowance, not a mandatory sending target.
+                  </div>
+                  <Button
+                    variant="primary"
+                    onClick={handleSaveSendingBudget}
+                    disabled={savingSendingBudget}
+                    className="flex items-center gap-2 shrink-0"
+                  >
+                    <span>{savingSendingBudget ? 'Saving...' : 'Save Sending Budget'}</span>
+                  </Button>
+                </div>
+              </div>
+            </section>
+
+            {/* Section 2: Active Senders & Provider Cluster */}
+            <section id="settings-active-accounts" className="scroll-mt-6">
+              <div className="border-b border-gray-200 dark:border-gray-700 pb-3 mb-4">
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+                  <span>Connected SMTP Sender Accounts</span>
+                  <span className="px-2 py-0.5 rounded-full text-xs font-mono bg-slate-800 text-slate-300 border border-slate-700">
+                    {sendingBudget.active_inboxes_count || 0} active
+                  </span>
+                </h3>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  All active accounts consume from the shared global monthly budget. Campaigns independently select which accounts are assigned.
+                </p>
+              </div>
+
+              <div className="bg-white dark:bg-slate-900/80 rounded-xl border border-gray-200 dark:border-slate-800 overflow-hidden shadow-xs">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-gray-50 dark:bg-slate-950/60 border-b border-gray-200 dark:border-slate-800 text-gray-500 dark:text-slate-400 font-semibold uppercase tracking-wider">
+                    <tr>
+                      <th className="px-4 py-3">Sender Identity</th>
+                      <th className="px-4 py-3">Display Name</th>
+                      <th className="px-4 py-3">Provider</th>
+                      <th className="px-4 py-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-slate-800 text-gray-700 dark:text-slate-300">
+                    {(sendingBudget.active_inboxes || []).map(inbox => (
+                      <tr key={inbox.id} className="hover:bg-gray-50 dark:hover:bg-slate-800/40 transition-colors">
+                        <td className="px-4 py-3 font-mono font-medium text-gray-900 dark:text-white">
+                          {inbox.email}
+                        </td>
+                        <td className="px-4 py-3 text-gray-600 dark:text-slate-300">
+                          {inbox.display_name}
+                        </td>
+                        <td className="px-4 py-3 font-mono text-[11px] uppercase text-gray-500 dark:text-slate-400">
+                          {inbox.provider}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                            Active
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
         )}
 
         {activeTab === 'setup' && (

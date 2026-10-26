@@ -10,13 +10,26 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import GmailAccount, GmailMessage, GmailSyncState, Inbox, Office365Account, Office365Message, SmtpAccount, SmtpMessage
+from app.models import (
+    EmailAttachment,
+    EmailDraft,
+    GmailAccount,
+    GmailMessage,
+    GmailSyncState,
+    Inbox,
+    Office365Account,
+    Office365Message,
+    SmtpAccount,
+    SmtpMessage,
+)
+from app.schemas import DraftCreate, DraftResponse
+from app.services.attachment_storage import attachment_storage
 from app.app_settings import get_office365_oauth_credentials
 from app.sender import SendResult, send_email
 from app.time import utcnow
@@ -92,9 +105,83 @@ async def get_unibox(
     page_size: int = Query(default=50, ge=1, le=200),
     leads_only: bool = Query(default=True),
     lead_status: str | None = Query(default=None),
+    tracking_filter: str | None = Query(default=None),
+    folder: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    return await list_unibox_conversations(db, page=page, page_size=page_size, leads_only=leads_only, lead_status=lead_status)
+    folder_str = folder if isinstance(folder, str) else None
+    tracking_str = tracking_filter if isinstance(tracking_filter, str) else None
+    return await list_unibox_conversations(
+        db,
+        page=page,
+        page_size=page_size,
+        leads_only=leads_only,
+        lead_status=lead_status,
+        tracking_filter=tracking_str,
+        folder=folder_str,
+    )
+
+
+@router.get("/attachments/{attachment_id}")
+async def get_attachment(attachment_id: int, db: AsyncSession = Depends(get_db)):
+    """Download email attachment securely with strict Content-Disposition headers."""
+    att_res = await db.execute(select(EmailAttachment).where(EmailAttachment.id == attachment_id))
+    att = att_res.scalar_one_or_none()
+    if not att:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    file_path = attachment_storage.get_attachment_path(att.storage_path)
+    if not file_path or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Attachment file not found on disk")
+
+    safe_filename = att.filename or "attachment.bin"
+    return FileResponse(
+        path=str(file_path),
+        filename=safe_filename,
+        media_type=att.content_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_filename}"',
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'",
+        },
+    )
+
+
+@router.get("/drafts")
+async def list_drafts(inbox_id: int | None = Query(default=None, ge=1), db: AsyncSession = Depends(get_db)):
+    stmt = select(EmailDraft).order_by(desc(EmailDraft.updated_at))
+    if inbox_id:
+        stmt = stmt.where(EmailDraft.inbox_id == inbox_id)
+    res = await db.execute(stmt)
+    return res.scalars().all()
+
+
+@router.post("/drafts")
+async def save_draft(draft_in: DraftCreate, db: AsyncSession = Depends(get_db)):
+    draft = EmailDraft(
+        inbox_id=draft_in.inbox_id,
+        thread_id=draft_in.thread_id,
+        to_email=draft_in.to_email,
+        subject=draft_in.subject,
+        body_html=draft_in.body_html,
+        body_plain=draft_in.body_plain,
+        in_reply_to=draft_in.in_reply_to,
+    )
+    db.add(draft)
+    await db.commit()
+    await db.refresh(draft)
+    return draft
+
+
+@router.delete("/drafts/{draft_id}")
+async def delete_draft(draft_id: int, db: AsyncSession = Depends(get_db)):
+    res = await db.execute(select(EmailDraft).where(EmailDraft.id == draft_id))
+    draft = res.scalar_one_or_none()
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    await db.delete(draft)
+    await db.commit()
+    return {"ok": True}
 
 
 @router.get("/status")

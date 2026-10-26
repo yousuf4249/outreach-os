@@ -127,7 +127,7 @@ async def delete_template(
     if not tmpl:
         raise HTTPException(status_code=404, detail="Template not found")
     await db.delete(tmpl)
-    await db.flush()
+    await db.commit()
     return {"ok": True, "deleted": template_id}
 
 

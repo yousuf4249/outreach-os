@@ -26,7 +26,8 @@ def now() -> datetime:
 
 def utcnow() -> datetime:
     """UTC now adjusted by configured offset."""
-    return datetime.utcnow() + _offset_timedelta()
+    from datetime import timezone
+    return datetime.now(timezone.utc).replace(tzinfo=None) + _offset_timedelta()
 
 
 def today() -> date:
